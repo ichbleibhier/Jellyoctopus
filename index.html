@@ -1,0 +1,1658 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Jelly Octopus</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --water: #0F3A4A; --jelly: #B79CFF; --core: #6E4BD8; --suckers: #F1E6FF;
+    --accent: #FF8FB8; --warm: #FFF0D6; --caustic: #BFF4FF;
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--water); }
+  body { font: 500 14px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--suckers); }
+  canvas { position: fixed; inset: 0; display: block; touch-action: none; outline: none; }
+  #title {
+    position: fixed; top: 14px; left: 20px; margin: 0;
+    font: 700 30px/1.1 "Baloo 2", system-ui, sans-serif; color: var(--suckers);
+    letter-spacing: .2px; pointer-events: none; user-select: none;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, .25);
+  }
+  #panel {
+    position: fixed; left: 16px; top: 68px; width: 220px; box-sizing: border-box;
+    padding: 14px 16px 16px; border-radius: 16px;
+    background: rgba(15, 58, 74, .6); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(241, 230, 255, .12); touch-action: manipulation;
+  }
+  .row { margin-bottom: 12px; }
+  .row label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+  .row output { font-variant-numeric: tabular-nums; opacity: .8; }
+  input[type=range] { width: 100%; margin: 0; accent-color: var(--accent); height: 22px; }
+  button {
+    width: 100%; height: 34px; border: 0; border-radius: 10px; cursor: pointer;
+    font: 600 14px system-ui, sans-serif; color: var(--water); background: var(--suckers);
+  }
+  button:hover { background: #fff; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #hint {
+    position: fixed; bottom: 26px; left: calc(118px + 50%); transform: translateX(-50%);
+    padding: 7px 14px; border-radius: 999px; background: rgba(15, 58, 74, .55);
+    font-size: 14px; letter-spacing: .3px; white-space: nowrap; pointer-events: none;
+    transition: opacity .9s ease;
+  }
+  #hint.gone { opacity: 0; }
+  @media (max-width: 700px) {
+    #title { font-size: 30px; top: 12px; left: 16px; }
+    #panel { top: auto; bottom: 16px; left: 16px; padding: 10px 14px 12px; }
+    .row { margin-bottom: 8px; }
+    #hint { bottom: auto; top: 58px; left: 16px; transform: none; font-size: 12.5px; }
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<h1 id="title">Jelly Octopus</h1>
+<div id="panel">
+  <div class="row">
+    <label for="soft">Softness <output id="softOut">0.30</output></label>
+    <input id="soft" type="range" min="0.1" max="1" step="0.01" value="0.3">
+  </div>
+  <div class="row">
+    <label for="cur">Current <output id="curOut">0.30</output></label>
+    <input id="cur" type="range" min="0" max="1" step="0.01" value="0.3">
+  </div>
+  <button id="reset" type="button">Reset</button>
+</div>
+<div id="hint">drag a tentacle · poke · tickle · toss</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------------------------------------------------------------- palette
+const PAL = {
+  jelly: 0xB79CFF, core: 0x6E4BD8, suckers: 0xF1E6FF, water: 0x0F3A4A,
+  sand: 0xE9D9B8, accent: 0xFF8FB8, warm: 0xFFF0D6, caustic: 0xBFF4FF,
+};
+const col = (h) => new THREE.Color(h);
+
+const mq = matchMedia('(prefers-reduced-motion: reduce)');
+let reducedMotion = mq.matches;
+mq.addEventListener('change', (e) => { reducedMotion = e.matches; });
+
+// ---------------------------------------------------------------- world constants
+const HOME = new THREE.Vector3(0, 0.15, 0);   // mantle centre; hero bbox centre ~ y 0
+const SEABED = -0.35;                          // 0.35 m below the hero
+const SUB = 1 / 120;                           // fixed PBD substep
+
+// ---------------------------------------------------------------- renderer / scene
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+if (!renderer.capabilities.isWebGL2) document.body.insertAdjacentHTML('beforeend', '<p style="position:fixed;top:40%;width:100%;text-align:center">WebGL2 required</p>');
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.AgXToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setClearColor(PAL.water, 1);
+document.body.prepend(renderer.domElement);
+const canvas = renderer.domElement;
+canvas.tabIndex = 0;
+
+// Halving the transmission pass: three r160 sizes its transmission target from
+// getDrawingBufferSize(), which nothing else in the renderer calls.
+const baseDBS = renderer.getDrawingBufferSize.bind(renderer);
+let transmissionHalf = false;
+renderer.getDrawingBufferSize = (t) => {
+  baseDBS(t);
+  if (transmissionHalf) t.set(Math.max(1, Math.floor(t.x / 2)), Math.max(1, Math.floor(t.y / 2)));
+  return t;
+};
+
+const scene = new THREE.Scene();
+scene.background = col(PAL.water);
+scene.fog = new THREE.FogExp2(PAL.water, 0.35);
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.03, 30);
+const CAM_TARGET = new THREE.Vector3(0, 0, 0);
+function placeCamera(dist) {
+  const el = THREE.MathUtils.degToRad(-5);
+  camera.position.set(0, Math.sin(el) * dist, Math.cos(el) * dist).add(CAM_TARGET);
+  camera.lookAt(CAM_TARGET);
+}
+
+// ---------------------------------------------------------------- caustic cookie
+const causticRT = new THREE.WebGLRenderTarget(512, 512, {
+  type: THREE.HalfFloatType, wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping,
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false,
+});
+const causticMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uCaustic: { value: col(PAL.caustic) } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: `
+    uniform float uTime; uniform vec3 uCaustic; varying vec2 vUv;
+    #define TAU 6.28318530718
+    float caus(vec2 uv, float time){
+      vec2 p = mod(uv * TAU, TAU) - 250.0;
+      vec2 i = p; float c = 1.0; float inten = 0.005;
+      for (int n = 0; n < 5; n++) {
+        float t = time * (1.0 - (3.5 / float(n + 1)));
+        i = p + vec2(cos(t - i.x) + sin(t + i.y), sin(t - i.y) + cos(t + i.x));
+        c += 1.0 / length(vec2(p.x / (sin(i.x + t) / inten), p.y / (cos(i.y + t) / inten)));
+      }
+      c /= 5.0; c = 1.17 - pow(c, 1.4);
+      return clamp(pow(abs(c), 8.0), 0.0, 1.0);
+    }
+    void main(){
+      float t = uTime * 0.45 + 23.0;
+      float v = caus(vUv * 5.0, t);
+      v = max(v, 0.6 * caus(vUv * 5.0 + vec2(0.37, 0.21), t * 0.83 + 4.0));
+      vec3 col = vec3(0.42) + uCaustic * v * 3.2;
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+  depthTest: false, depthWrite: false,
+});
+const causticScene = new THREE.Scene();
+causticScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), causticMat));
+const causticCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+let causticDrawn = false;
+function renderCaustics(t) {
+  if (reducedMotion && causticDrawn) return;
+  causticMat.uniforms.uTime.value = reducedMotion ? 0 : t;
+  const prevTM = renderer.toneMapping;
+  renderer.setRenderTarget(causticRT);
+  renderer.render(causticScene, causticCam);
+  renderer.setRenderTarget(null);
+  renderer.toneMapping = prevTM;
+  causticDrawn = true;
+}
+
+// ---------------------------------------------------------------- lights (no ambient)
+const key = new THREE.SpotLight(PAL.warm, 2.6, 0, 0.78, 0.6, 0);
+key.position.set(0.35, 2.5, 0.45);
+key.target.position.set(0, -0.2, -0.15);
+key.map = causticRT.texture;
+key.castShadow = true;
+key.shadow.mapSize.set(1024, 1024);
+key.shadow.camera.near = 1.2; key.shadow.camera.far = 4.5;
+key.shadow.bias = -0.0006; key.shadow.normalBias = 0.01; key.shadow.radius = 5;
+scene.add(key, key.target);
+const rim = new THREE.DirectionalLight(PAL.caustic, 1.5);
+rim.position.set(-0.5, 0.8, -1.6);
+scene.add(rim);
+
+// ---------------------------------------------------------------- seabed
+const shadowU = { value: new THREE.Vector4(0, 0, 0.5, 0.17) };
+function sandHeight(x, z) {
+  return 0.0035 * Math.sin(x * 22 + 2.2 * Math.sin(z * 2.7)) + 0.0025 * Math.sin(z * 31 + x * 6)
+    + 0.012 * Math.sin(x * 1.6 + z * 1.1) * Math.sin(z * 1.3 - 0.4);
+}
+{
+  const g = new THREE.PlaneGeometry(26, 26, 220, 220);
+  g.rotateX(-Math.PI / 2);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) p.setY(i, sandHeight(p.getX(i), p.getZ(i)));
+  g.computeVertexNormals();
+  const cv = document.createElement('canvas'); cv.width = cv.height = 256;
+  const cx = cv.getContext('2d'); const img = cx.createImageData(256, 256);
+  let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  for (let i = 0; i < 256 * 256; i++) {
+    const n = 0.86 + rnd() * 0.18;
+    img.data[i * 4] = 233 * n; img.data[i * 4 + 1] = 217 * n; img.data[i * 4 + 2] = 184 * n; img.data[i * 4 + 3] = 255;
+  }
+  cx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(60, 60);
+  tex.anisotropy = 4;
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: tex, roughness: 0.95, metalness: 0 });
+  mat.onBeforeCompile = (s) => {
+    s.uniforms.uShadow = shadowU;
+    s.vertexShader = 'varying vec3 vWP;\n' + s.vertexShader.replace('#include <worldpos_vertex>',
+      '#include <worldpos_vertex>\n vWP = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    s.fragmentShader = 'uniform vec4 uShadow;\nvarying vec3 vWP;\n' + s.fragmentShader.replace('#include <color_fragment>',
+      `#include <color_fragment>
+       vec2 dd = (vWP.xz - uShadow.xy) * vec2(1.0, 1.25);
+       float cs = exp(-dot(dd, dd) / (2.0 * uShadow.w * uShadow.w));
+       float core = exp(-dot(dd, dd) / (2.0 * 0.25 * uShadow.w * uShadow.w));
+       diffuseColor.rgb *= 1.0 - uShadow.z * (0.65 * cs + 0.35 * core);`);
+  };
+  const sand = new THREE.Mesh(g, mat);
+  sand.position.y = SEABED; sand.receiveShadow = true;
+  scene.add(sand);
+
+  // two pebbles
+  const mk = (sx, sy, sz, c, x, z, rot, ph) => {
+    const pg = new THREE.IcosahedronGeometry(1, 4);
+    const pp = pg.attributes.position; const v = new THREE.Vector3();
+    for (let i = 0; i < pp.count; i++) {
+      v.fromBufferAttribute(pp, i);
+      const n = 1 + 0.07 * Math.sin(v.x * 3.1 + ph) * Math.sin(v.y * 2.7 + 1.3 * ph) + 0.05 * Math.sin(v.z * 4.3 - ph);
+      const nn = v.clone().normalize();
+      v.multiplyScalar(n); pp.setXYZ(i, v.x, v.y, v.z);
+      pg.attributes.normal.setXYZ(i, nn.x, nn.y, nn.z);
+    }
+    const m = new THREE.Mesh(pg, new THREE.MeshStandardMaterial({ color: c, roughness: 0.78 }));
+    m.scale.set(sx, sy, sz); m.rotation.y = rot;
+    m.position.set(x, SEABED + sandHeight(x, z) + sy * 0.55, z);
+    m.castShadow = m.receiveShadow = true;
+    scene.add(m);
+  };
+  mk(0.075, 0.042, 0.058, 0xA89A86, -0.33, -0.12, 0.6, 1.0);
+  mk(0.045, 0.03, 0.04, 0xC9B79E, 0.27, 0.12, -0.4, 2.3);
+}
+
+// ---------------------------------------------------------------- materials
+const jellyMat = new THREE.MeshPhysicalMaterial({
+  color: PAL.jelly, transmission: 0.92, thickness: 0.15, roughness: 0.1, ior: 1.34,
+  attenuationColor: col(PAL.core), attenuationDistance: 0.15,
+  clearcoat: 1.0, clearcoatRoughness: 0.06, metalness: 0,
+  sheen: 0.6, sheenColor: col(PAL.jelly), sheenRoughness: 0.45,
+  emissive: col(PAL.jelly), emissiveIntensity: 0.17,
+  specularIntensity: 1.0,
+});
+const coreMat = new THREE.MeshStandardMaterial({ color: PAL.core, roughness: 0.42, emissive: col(PAL.core), emissiveIntensity: 0.6 });
+const suckerMat = new THREE.MeshStandardMaterial({ color: PAL.suckers, roughness: 0.38, emissive: col(PAL.suckers), emissiveIntensity: 0.08 });
+const BASE = {
+  jelly: col(PAL.jelly), core: col(PAL.core), accent: col(PAL.accent),
+  att: col(PAL.core), emis: col(PAL.jelly),
+};
+
+// ================================================================= PHYSICS
+// ---------------------------------------------------------------- mantle cage (500 particles)
+const SEMI = [0.11, 0.115, 0.105];
+const RINGS = 19, SEGS = 26;
+const NS = 2 + RINGS * SEGS;   // 496 surface particles
+const NC = NS + 4;             // + 4 interior axis particles = 500
+const cq = new Float64Array(NC * 3);            // rest, local
+const cx = new Float64Array(NC * 3), cpv = new Float64Array(NC * 3), cvel = new Float64Array(NC * 3);
+const cgoal = new Float64Array(NC * 3);
+{
+  let n = 0;
+  const put = (x, y, z) => { cq[n * 3] = x; cq[n * 3 + 1] = y; cq[n * 3 + 2] = z; n++; };
+  put(0, SEMI[1], 0);
+  for (let r = 1; r <= RINGS; r++) {
+    const ph = Math.PI * r / (RINGS + 1);
+    for (let s = 0; s < SEGS; s++) {
+      const th = 2 * Math.PI * s / SEGS + (r % 2) * Math.PI / SEGS;
+      put(SEMI[0] * Math.sin(ph) * Math.cos(th), SEMI[1] * Math.cos(ph), SEMI[2] * Math.sin(ph) * Math.sin(th));
+    }
+  }
+  put(0, -SEMI[1], 0);
+  for (const y of [-0.05, -0.017, 0.017, 0.05]) put(0, y, 0);
+}
+const ringIdx = (r, s) => 1 + (r - 1) * SEGS + ((s % SEGS) + SEGS) % SEGS;
+const cTris = [];
+for (let s = 0; s < SEGS; s++) cTris.push(0, ringIdx(1, s + 1), ringIdx(1, s));
+for (let r = 1; r < RINGS; r++) {
+  for (let s = 0; s < SEGS; s++) {
+    // stagger: odd rings are rotated by half a segment
+    const a = ringIdx(r, s), b = ringIdx(r, s + 1);
+    const odd = r % 2 === 1;
+    const c = ringIdx(r + 1, odd ? s + 1 : s), d = ringIdx(r + 1, odd ? s : s - 1);
+    // a,b on ring r; c is "under" between a and b; d under-left of a
+    cTris.push(a, b, c);
+    cTris.push(a, c, d);
+  }
+}
+for (let s = 0; s < SEGS; s++) cTris.push(NS - 1, ringIdx(RINGS, s), ringIdx(RINGS, s + 1));
+const cTri = new Uint16Array(cTris);
+function triVolume(arr, cxm, cym, czm) {
+  let V = 0;
+  for (let t = 0; t < cTri.length; t += 3) {
+    const a = cTri[t] * 3, b = cTri[t + 1] * 3, c = cTri[t + 2] * 3;
+    const ax = arr[a] - cxm, ay = arr[a + 1] - cym, az = arr[a + 2] - czm;
+    const bx = arr[b] - cxm, by = arr[b + 1] - cym, bz = arr[b + 2] - czm;
+    const qx = arr[c] - cxm, qy = arr[c + 1] - cym, qz = arr[c + 2] - czm;
+    V += ax * (by * qz - bz * qy) + ay * (bz * qx - bx * qz) + az * (bx * qy - by * qx);
+  }
+  return V / 6;
+}
+if (triVolume(cq, 0, 0, 0) < 0) for (let t = 0; t < cTri.length; t += 3) { const x = cTri[t + 1]; cTri[t + 1] = cTri[t + 2]; cTri[t + 2] = x; }
+const V0 = triVolume(cq, 0, 0, 0);
+// edges for distance constraints
+const cEdges = []; {
+  const seen = new Set();
+  for (let t = 0; t < cTri.length; t += 3) for (let e = 0; e < 3; e++) {
+    const i = cTri[t + e], j = cTri[t + (e + 1) % 3];
+    const k = i < j ? i * 1000 + j : j * 1000 + i;
+    if (!seen.has(k)) { seen.add(k); cEdges.push(i, j); }
+  }
+}
+const cEdge = new Uint16Array(cEdges);
+const cEdgeL = new Float64Array(cEdge.length / 2);
+for (let e = 0; e < cEdgeL.length; e++) {
+  const i = cEdge[e * 2] * 3, j = cEdge[e * 2 + 1] * 3;
+  cEdgeL[e] = Math.hypot(cq[i] - cq[j], cq[i + 1] - cq[j + 1], cq[i + 2] - cq[j + 2]);
+}
+const cGrad = new Float64Array(NS * 3);
+
+// ---------------------------------------------------------------- tentacles
+const TN = 8, TP = 25, TSEG = 24, TLEN = 0.35, L0 = TLEN / TSEG;
+const R_ROOT = 0.02, R_TIP = 0.002;
+const tx = new Float64Array(TN * TP * 3), tpv = new Float64Array(TN * TP * 3), tvel = new Float64Array(TN * TP * 3);
+const tRad = new Float64Array(TN * TP);        // current collision radius
+const tSegScale = new Float64Array(TN * TSEG).fill(1);
+const baseRad = new Float64Array(TP);
+for (let i = 0; i < TP; i++) baseRad[i] = R_ROOT + (R_TIP - R_ROOT) * Math.pow(i / TSEG, 0.85);
+const bendK = new Float64Array(TSEG);
+for (let i = 0; i < TSEG; i++) bendK[i] = 0.6 + (0.1 - 0.6) * (i / (TSEG - 1));
+const kRest = new Float64Array(TSEG);
+const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+for (let i = 0; i < TSEG; i++) {
+  const s = i * L0;
+  kRest[i] = -4.2 * (1 - smooth(0.0, 0.13, s)) + 15 * smooth(0.15, 0.35, s);
+}
+const T = [];
+for (let k = 0; k < TN; k++) {
+  const th = (k + 0.5) * Math.PI / 4;
+  const r = [Math.cos(th), 0, Math.sin(th)];
+  const d = [0.56 * r[0], -0.83, 0.56 * r[2]]; const dl = Math.hypot(...d);
+  T.push({
+    th, rootL: [0.068 * r[0], -0.1, 0.068 * r[2]],
+    dirL: d.map((v) => v / dl),
+    axisL: [-Math.sin(th), 0, Math.cos(th)],       // r x up: rotation toward aboral side
+    phase: k * 0.79 + (k % 2) * 1.3,
+    stretch: 1, curl: 0, recoilT: -10, tickleT: -10, grabbed: -1, target: new THREE.Vector3(),
+  });
+}
+
+// ---------------------------------------------------------------- state
+const sim = {
+  t: 0, softness: 0.3, current: 0.3, idle: true,
+  mode: 'idle', releaseT: 0, pulseN: 0, nextPulse: 0, pulsePhase0: 0,
+  m: new THREE.Vector3(), q: new THREE.Quaternion(), R: new Float64Array(9), S: [1, 1, 1],
+  poke: null, flushT: -10, squintT: -10, blinkT: 2, blinkNext: 3.2,
+  boundX: 0.22, boundY: 0.22, volMin: 1, volMax: 1, vol: 1, maxPen: 0, maxStretch: 1,
+};
+const IDQ = new THREE.Quaternion();
+const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion();
+const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+
+function quatToMat(q, M) {
+  const x = q.x, y = q.y, z = q.z, w = q.w;
+  M[0] = 1 - 2 * (y * y + z * z); M[1] = 2 * (x * y - z * w); M[2] = 2 * (x * z + y * w);
+  M[3] = 2 * (x * y + z * w); M[4] = 1 - 2 * (x * x + z * z); M[5] = 2 * (y * z - x * w);
+  M[6] = 2 * (x * z - y * w); M[7] = 2 * (y * z + x * w); M[8] = 1 - 2 * (x * x + y * y);
+}
+const _M = new Float64Array(9), _G = new Float64Array(9), _A = new Float64Array(9);
+// Müller et al. 2016, robust rotation extraction (warm-started quaternion)
+function extractRotation(A, q, iters) {
+  for (let it = 0; it < iters; it++) {
+    quatToMat(q, _M);
+    // columns r_c = (M[c], M[3+c], M[6+c]); a_c likewise
+    let ox = 0, oy = 0, oz = 0, dot = 0;
+    for (let c = 0; c < 3; c++) {
+      const rx = _M[c], ry = _M[3 + c], rz = _M[6 + c];
+      const ax = A[c], ay = A[3 + c], az = A[6 + c];
+      ox += ry * az - rz * ay; oy += rz * ax - rx * az; oz += rx * ay - ry * ax;
+      dot += rx * ax + ry * ay + rz * az;
+    }
+    const inv = 1 / (Math.abs(dot) + 1e-9);
+    ox *= inv; oy *= inv; oz *= inv;
+    const w = Math.hypot(ox, oy, oz);
+    if (w < 1e-9) break;
+    _v.set(ox / w, oy / w, oz / w);
+    _q2.setFromAxisAngle(_v, w);
+    q.premultiply(_q2).normalize();
+  }
+}
+
+function idlePulse(t) {
+  // 0..1 contraction amount; period 2.5 s, quick squeeze, slow relax
+  const ph = ((t - sim.pulsePhase0) % 2.5 + 2.5) % 2.5 / 2.5;
+  return ph < 0.18 ? smooth(0, 0.18, ph) : 1 - smooth(0.18, 0.62, ph);
+}
+function curlEnvelope(tt) {
+  let c = 0;
+  const r = sim.t - tt.recoilT;
+  if (r >= 0 && r < 2.0) c = Math.max(c, 0.75 * (r < 0.8 ? 1 - Math.pow(1 - r / 0.8, 3) : 1 - smooth(0.8, 2.0, r)));
+  const k = sim.t - tt.tickleT;
+  if (k >= 0 && k < 2.2) c = Math.max(c, k < 0.25 ? smooth(0, 0.25, k) : k < 1.0 ? 1 : 1 - smooth(1.0, 2.2, k));
+  return c;
+}
+
+function resetSim() {
+  sim.t = 0; sim.mode = 'idle'; sim.poke = null; sim.flushT = -10; sim.squintT = -10; sim.pulsePhase0 = 0;
+  sim.q.identity(); quatToMat(sim.q, sim.R); sim.S = [1, 1, 1]; sim.m.copy(HOME);
+  for (let i = 0; i < NC; i++) for (let a = 0; a < 3; a++) {
+    cx[i * 3 + a] = cpv[i * 3 + a] = cq[i * 3 + a] + HOME.getComponent(a); cvel[i * 3 + a] = 0;
+  }
+  for (let k = 0; k < TN; k++) {
+    const tt = T[k];
+    tt.stretch = 1; tt.curl = 0; tt.recoilT = -10; tt.tickleT = -10; tt.grabbed = -1;
+    // integrate the rest curve
+    let px = tt.rootL[0] + HOME.x, py = tt.rootL[1] + HOME.y, pz = tt.rootL[2] + HOME.z;
+    let d = new THREE.Vector3(...tt.dirL); const ax = new THREE.Vector3(...tt.axisL);
+    for (let i = 0; i < TP; i++) {
+      const b = (k * TP + i) * 3;
+      tx[b] = tpv[b] = px; tx[b + 1] = tpv[b + 1] = py; tx[b + 2] = tpv[b + 2] = pz;
+      tvel[b] = tvel[b + 1] = tvel[b + 2] = 0;
+      tRad[k * TP + i] = baseRad[i];
+      if (i < TSEG) {
+        if (i > 0) d.applyAxisAngle(ax, kRest[i] * L0);
+        px += d.x * L0; py += d.y * L0; pz += d.z * L0;
+        tSegScale[k * TSEG + i] = 1;
+      }
+    }
+  }
+  sim.volMin = sim.volMax = 1; sim.maxPen = 0; sim.maxStretch = 1;
+}
+
+// water velocity at a point
+function water(x, y, z, out) {
+  const c = sim.current * 0.11;
+  let gx = 1, gz = 0.35;
+  if (!reducedMotion) {
+    const t = sim.t;
+    const g = 0.55 * Math.sin(0.7 * t + x * 3.0 + z) + 0.3 * Math.sin(1.9 * t + z * 4.0 - y * 2);
+    gx += g; gz += 0.6 * Math.sin(0.9 * t + y * 5 + 1.7);
+  }
+  out[0] = c * gx; out[1] = c * 0.15 * Math.sin(sim.t * 0.5 + x * 2) * (reducedMotion ? 0 : 1); out[2] = c * gz;
+}
+
+// ---------------------------------------------------------------- pointer-driven inputs used by physics
+const grab = { type: null, id: -1, k: -1, g: -1, target: new THREE.Vector3(), parts: [], w: [], off: [], moved: false, sx: 0, sy: 0, t0: 0 };
+
+function stiffScale() { return Math.pow(0.3 / sim.softness, 0.8); }
+
+const _w3 = [0, 0, 0];
+function stepCage(dt) {
+  const ss = stiffScale();
+  const alpha = Math.min(0.85, 0.3 * ss);
+  // ---- velocity: CoM drag + internal damping (0.4) + jets
+  let vx = 0, vy = 0, vz = 0;
+  for (let i = 0; i < NC; i++) { vx += cvel[i * 3]; vy += cvel[i * 3 + 1]; vz += cvel[i * 3 + 2]; }
+  vx /= NC; vy /= NC; vz /= NC;
+  const comDrag = 4.6;
+  const fC = Math.exp(-comDrag * dt), fR = Math.pow(1 - 0.4, dt * 10);
+  let nvx = vx * fC, nvy = vy * fC, nvz = vz * fC;
+  if (sim.mode === 'idle' && grab.type !== 'mantle') {
+    const K = 7;
+    nvx += (HOME.x - sim.m.x) * K * dt; nvy += (HOME.y - sim.m.y) * K * dt; nvz += (HOME.z - sim.m.z) * K * dt;
+  }
+  if (sim.jet) { nvx += sim.jet[0]; nvy += sim.jet[1]; nvz += sim.jet[2]; sim.jet = null; }
+  for (let i = 0; i < NC; i++) {
+    const b = i * 3;
+    cvel[b] = nvx + (cvel[b] - vx) * fR; cvel[b + 1] = nvy + (cvel[b + 1] - vy) * fR; cvel[b + 2] = nvz + (cvel[b + 2] - vz) * fR;
+    cpv[b] = cx[b]; cpv[b + 1] = cx[b + 1]; cpv[b + 2] = cx[b + 2];
+    cx[b] += cvel[b] * dt; cx[b + 1] += cvel[b + 1] * dt; cx[b + 2] += cvel[b + 2] * dt;
+  }
+  // ---- grab (toss drag)
+  if (grab.type === 'mantle' && grab.moved) {
+    for (let n = 0; n < grab.parts.length; n++) {
+      const b = grab.parts[n] * 3, w = grab.w[n] * 0.55, o = grab.off[n];
+      cx[b] += (grab.target.x + o[0] - cx[b]) * w;
+      cx[b + 1] += (grab.target.y + o[1] - cx[b + 1]) * w;
+      cx[b + 2] += (grab.target.z + o[2] - cx[b + 2]) * w;
+    }
+  }
+  // ---- distance constraints (surface springs)
+  const kd = Math.min(0.6, 0.25 * ss);
+  for (let e = 0; e < cEdgeL.length; e++) {
+    const i = cEdge[e * 2] * 3, j = cEdge[e * 2 + 1] * 3;
+    const dx = cx[j] - cx[i], dy = cx[j + 1] - cx[i + 1], dz = cx[j + 2] - cx[i + 2];
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-12;
+    const c = (len - cEdgeL[e]) / len * 0.5 * kd;
+    cx[i] += dx * c; cx[i + 1] += dy * c; cx[i + 2] += dz * c;
+    cx[j] -= dx * c; cx[j + 1] -= dy * c; cx[j + 2] -= dz * c;
+  }
+  // ---- shape matching with idle contraction (volume preserving: sx*sy*sz = 1)
+  let mx = 0, my = 0, mz = 0;
+  for (let i = 0; i < NC; i++) { mx += cx[i * 3]; my += cx[i * 3 + 1]; mz += cx[i * 3 + 2]; }
+  mx /= NC; my /= NC; mz /= NC;
+  _A.fill(0);
+  for (let i = 0; i < NC; i++) {
+    const b = i * 3;
+    const dx = cx[b] - mx, dy = cx[b + 1] - my, dz = cx[b + 2] - mz;
+    const qx = cq[b], qy = cq[b + 1], qz = cq[b + 2];
+    _A[0] += dx * qx; _A[1] += dx * qy; _A[2] += dx * qz;
+    _A[3] += dy * qx; _A[4] += dy * qy; _A[5] += dy * qz;
+    _A[6] += dz * qx; _A[7] += dz * qy; _A[8] += dz * qz;
+  }
+  extractRotation(_A, sim.q, 4);
+  _q.copy(sim.q).slerp(IDQ, 0.012);
+  quatToMat(_q, _G);
+  const p = sim.idle ? idlePulse(sim.t) : 0;
+  const sx = 1 - 0.06 * p, sy = 1 / (sx * sx);
+  sim.S[0] = sx; sim.S[1] = sy; sim.S[2] = sx;
+  const pk = sim.poke;
+  let pkAmt = 0;
+  if (pk) {
+    const a = sim.t - pk.t0;
+    pkAmt = a < 0.035 ? a / 0.035 : a < pk.hold ? 1 : 0;
+  }
+  // a poke dents the surface without shoving the body: offset all goals by the dent's mean
+  let cmx = 0, cmy = 0, cmz = 0;
+  if (pkAmt > 0) { const f = pk.depth * pkAmt * pk.wSum / NC; cmx = pk.n.x * f; cmy = pk.n.y * f; cmz = pk.n.z * f; }
+  for (let i = 0; i < NC; i++) {
+    const b = i * 3;
+    const qx = cq[b] * sx, qy = cq[b + 1] * sy, qz = cq[b + 2] * sx;
+    let gx = mx + _G[0] * qx + _G[1] * qy + _G[2] * qz;
+    let gy = my + _G[3] * qx + _G[4] * qy + _G[5] * qz;
+    let gz = mz + _G[6] * qx + _G[7] * qy + _G[8] * qz;
+    gx += cmx; gy += cmy; gz += cmz;
+    if (pkAmt > 0) {
+      const w = pk.w[i];
+      if (w > 0) { gx -= pk.n.x * pk.depth * w * pkAmt; gy -= pk.n.y * pk.depth * w * pkAmt; gz -= pk.n.z * pk.depth * w * pkAmt; }
+    }
+    const a = (pkAmt > 0 && pk.w[i] > 0.02) ? Math.max(alpha, 0.5) : alpha;
+    cx[b] += (gx - cx[b]) * a; cx[b + 1] += (gy - cx[b + 1]) * a; cx[b + 2] += (gz - cx[b + 2]) * a;
+  }
+  // ---- volume constraint over the closed surface
+  for (let it = 0; it < 2; it++) {
+    const V = triVolume(cx, mx, my, mz);
+    cGrad.fill(0);
+    for (let t = 0; t < cTri.length; t += 3) {
+      const ia = cTri[t], ib = cTri[t + 1], ic = cTri[t + 2];
+      const a = ia * 3, bb = ib * 3, c = ic * 3;
+      const ax = cx[a] - mx, ay = cx[a + 1] - my, az = cx[a + 2] - mz;
+      const bx = cx[bb] - mx, by = cx[bb + 1] - my, bz = cx[bb + 2] - mz;
+      const qx = cx[c] - mx, qy = cx[c + 1] - my, qz = cx[c + 2] - mz;
+      cGrad[a] += by * qz - bz * qy; cGrad[a + 1] += bz * qx - bx * qz; cGrad[a + 2] += bx * qy - by * qx;
+      cGrad[bb] += qy * az - qz * ay; cGrad[bb + 1] += qz * ax - qx * az; cGrad[bb + 2] += qx * ay - qy * ax;
+      cGrad[c] += ay * bz - az * by; cGrad[c + 1] += az * bx - ax * bz; cGrad[c + 2] += ax * by - ay * bx;
+    }
+    let den = 0;
+    for (let i = 0; i < NS * 3; i++) { cGrad[i] /= 6; den += cGrad[i] * cGrad[i]; }
+    const lam = -(V - V0) / (den + 1e-18);
+    for (let i = 0; i < NS * 3; i++) cx[i] += lam * cGrad[i];
+  }
+  // ---- keep the hero in view
+  mx = 0; my = 0; mz = 0;
+  for (let i = 0; i < NC; i++) { mx += cx[i * 3]; my += cx[i * 3 + 1]; mz += cx[i * 3 + 2]; }
+  mx /= NC; my /= NC; mz /= NC;
+  const ox = (mx - HOME.x) / sim.boundX, oy = (my - HOME.y) / sim.boundY, oz = (mz - HOME.z) / sim.boundX;
+  const od = Math.hypot(ox, oy, oz);
+  if (od > 1) {
+    const f = (od - 1) / od;
+    const sxx = ox * f * sim.boundX, syy = oy * f * sim.boundY, szz = oz * f * sim.boundX;
+    for (let i = 0; i < NC; i++) { cx[i * 3] -= sxx; cx[i * 3 + 1] -= syy; cx[i * 3 + 2] -= szz; }
+    mx -= sxx; my -= syy; mz -= szz;
+  }
+  // ---- velocities
+  const id = 1 / dt;
+  for (let i = 0; i < NC * 3; i++) cvel[i] = (cx[i] - cpv[i]) * id;
+  sim.m.set(mx, my, mz);
+  quatToMat(sim.q, sim.R);
+}
+
+// segment-segment closest points (Ericson); returns [s,t]
+const _st = [0, 0];
+function segSeg(p1x, p1y, p1z, q1x, q1y, q1z, p2x, p2y, p2z, q2x, q2y, q2z) {
+  const d1x = q1x - p1x, d1y = q1y - p1y, d1z = q1z - p1z;
+  const d2x = q2x - p2x, d2y = q2y - p2y, d2z = q2z - p2z;
+  const rx = p1x - p2x, ry = p1y - p2y, rz = p1z - p2z;
+  const a = d1x * d1x + d1y * d1y + d1z * d1z, e = d2x * d2x + d2y * d2y + d2z * d2z;
+  const f = d2x * rx + d2y * ry + d2z * rz, c = d1x * rx + d1y * ry + d1z * rz;
+  const b = d1x * d2x + d1y * d2y + d1z * d2z;
+  const den = a * e - b * b;
+  let s = den > 1e-14 ? Math.min(1, Math.max(0, (b * f - c * e) / den)) : 0;
+  let t = (b * s + f) / e;
+  if (t < 0) { t = 0; s = Math.min(1, Math.max(0, -c / a)); }
+  else if (t > 1) { t = 1; s = Math.min(1, Math.max(0, (b - c) / a)); }
+  _st[0] = s; _st[1] = t;
+}
+
+function invMass(k, i) { return (i === 0 || T[k].grabbed === i) ? 0 : 1; }
+
+function collideTentacles() {
+  let worst = 0;
+  const NSg = TN * TSEG;
+  for (let A = 0; A < NSg; A++) {
+    const ka = (A / TSEG) | 0, ia = A % TSEG;
+    const a0 = (ka * TP + ia) * 3, a1 = a0 + 3;
+    const amx = (tx[a0] + tx[a1]) * 0.5, amy = (tx[a0 + 1] + tx[a1 + 1]) * 0.5, amz = (tx[a0 + 2] + tx[a1 + 2]) * 0.5;
+    const ra = Math.max(tRad[ka * TP + ia], tRad[ka * TP + ia + 1]);
+    for (let B = A + 1; B < NSg; B++) {
+      const kb = (B / TSEG) | 0, ib = B % TSEG;
+      if (ka === kb && ib - ia < 4) continue;
+      if (ia === 0 && ib === 0) continue;
+      const b0 = (kb * TP + ib) * 3, b1 = b0 + 3;
+      const bmx = (tx[b0] + tx[b1]) * 0.5 - amx, bmy = (tx[b0 + 1] + tx[b1 + 1]) * 0.5 - amy, bmz = (tx[b0 + 2] + tx[b1 + 2]) * 0.5 - amz;
+      const rb = Math.max(tRad[kb * TP + ib], tRad[kb * TP + ib + 1]);
+      const reach = ra + rb + 0.03;
+      if (bmx * bmx + bmy * bmy + bmz * bmz > reach * reach) continue;
+      segSeg(tx[a0], tx[a0 + 1], tx[a0 + 2], tx[a1], tx[a1 + 1], tx[a1 + 2], tx[b0], tx[b0 + 1], tx[b0 + 2], tx[b1], tx[b1 + 1], tx[b1 + 2]);
+      const s = _st[0], t = _st[1];
+      const cax = tx[a0] + (tx[a1] - tx[a0]) * s, cay = tx[a0 + 1] + (tx[a1 + 1] - tx[a0 + 1]) * s, caz = tx[a0 + 2] + (tx[a1 + 2] - tx[a0 + 2]) * s;
+      const cbx = tx[b0] + (tx[b1] - tx[b0]) * t, cby = tx[b0 + 1] + (tx[b1 + 1] - tx[b0 + 1]) * t, cbz = tx[b0 + 2] + (tx[b1 + 2] - tx[b0 + 2]) * t;
+      let nx = cax - cbx, ny = cay - cby, nz = caz - cbz;
+      const d = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      const rA = tRad[ka * TP + ia] * (1 - s) + tRad[ka * TP + ia + 1] * s;
+      const rB = tRad[kb * TP + ib] * (1 - t) + tRad[kb * TP + ib + 1] * t;
+      const minD = rA + rB + 0.0015;
+      if (d >= minD) continue;
+      if (d < 1e-9) { nx = 0; ny = 1; nz = 0; } else { nx /= d; ny /= d; nz /= d; }
+      const pen = minD - d;
+      worst = Math.max(worst, pen - 0.0015);
+      const wa0 = invMass(ka, ia) * (1 - s), wa1 = invMass(ka, ia + 1) * s;
+      const wb0 = invMass(kb, ib) * (1 - t), wb1 = invMass(kb, ib + 1) * t;
+      const W = wa0 * (1 - s) + wa1 * s + wb0 * (1 - t) + wb1 * t;
+      if (W < 1e-9) continue;
+      const l = pen / W;
+      tx[a0] += nx * l * wa0; tx[a0 + 1] += ny * l * wa0; tx[a0 + 2] += nz * l * wa0;
+      tx[a1] += nx * l * wa1; tx[a1 + 1] += ny * l * wa1; tx[a1 + 2] += nz * l * wa1;
+      tx[b0] -= nx * l * wb0; tx[b0 + 1] -= ny * l * wb0; tx[b0 + 2] -= nz * l * wb0;
+      tx[b1] -= nx * l * wb1; tx[b1 + 1] -= ny * l * wb1; tx[b1 + 2] -= nz * l * wb1;
+    }
+  }
+  return worst;
+}
+
+// collide a point against the mantle & crown ellipsoids (in the cage frame); returns penetration before push
+function collideBody(b, r, i) {
+  const R = sim.R, S = sim.S, m = sim.m;
+  let worst = 0;
+  const dx = tx[b] - m.x, dy = tx[b + 1] - m.y, dz = tx[b + 2] - m.z;
+  // to local
+  let lx = R[0] * dx + R[3] * dy + R[6] * dz;
+  let ly = R[1] * dx + R[4] * dy + R[7] * dz;
+  let lz = R[2] * dx + R[5] * dy + R[8] * dz;
+  let hit = false;
+  const ell = (cy, ax, ay, az) => {
+    const ex = ax + r, ey = ay + r, ez = az + r;
+    const yy = ly - cy;
+    const e = (lx / ex) ** 2 + (yy / ey) ** 2 + (lz / ez) ** 2;
+    if (e < 1 && e > 1e-9) {
+      const f = 1 / Math.sqrt(e);
+      worst = Math.max(worst, (f - 1) * Math.sqrt(lx * lx + yy * yy + lz * lz) / f);
+      lx *= f; ly = cy + yy * f; lz *= f; hit = true;
+    }
+  };
+  if (i >= 2) ell(0, SEMI[0] * S[0], SEMI[1] * S[1], SEMI[2] * S[2]);
+  if (i >= 5) ell(-0.082, 0.078, 0.04, 0.078);
+  if (hit) {
+    tx[b] = m.x + R[0] * lx + R[1] * ly + R[2] * lz;
+    tx[b + 1] = m.y + R[3] * lx + R[4] * ly + R[5] * lz;
+    tx[b + 2] = m.z + R[6] * lx + R[7] * ly + R[8] * lz;
+  }
+  const floor = SEABED + r + 0.004;
+  if (tx[b + 1] < floor) { worst = Math.max(worst, floor - tx[b + 1] - 0.004); tx[b + 1] = floor; }
+  return worst;
+}
+
+function clampStretch(k, g) {
+  // hard limit: no segment up to the grab point may exceed 1.48x rest length
+  const rb = k * TP * 3, Lmax = L0 * 1.48;
+  for (let rep = 0; rep < 8; rep++) {
+    for (let n = 0; n < 2 * g; n++) {
+      const i = n < g ? n : 2 * g - 1 - n;
+      const p0 = rb + i * 3, p1 = p0 + 3;
+      const ex = tx[p1] - tx[p0], ey = tx[p1 + 1] - tx[p0 + 1], ez = tx[p1 + 2] - tx[p0 + 2];
+      const len = Math.sqrt(ex * ex + ey * ey + ez * ez);
+      if (len <= Lmax) continue;
+      const f = (len - Lmax) / len;
+      if (n < g && i + 1 !== g) { tx[p1] -= ex * f; tx[p1 + 1] -= ey * f; tx[p1 + 2] -= ez * f; }
+      else if (i !== 0) { tx[p0] += ex * f; tx[p0 + 1] += ey * f; tx[p0 + 2] += ez * f; }
+    }
+  }
+}
+
+const _wv = [0, 0, 0];
+function stepTentacles(dt) {
+  const R = sim.R, S = sim.S, m = sim.m;
+  const ss = stiffScale();
+  const bendScale = Math.min(1.5, Math.max(0.45, Math.sqrt(ss)));
+  const fd = 1 - Math.exp(-2.0 * dt);              // water drag 2.0
+  const fdi = Math.pow(0.42, dt * 10);             // internal damping of relative motion
+  const id = 1 / dt;
+  const wave = sim.idle ? 1 : 0;
+  let worst = 0;
+  for (let k = 0; k < TN; k++) {
+    const tt = T[k];
+    tt.curl = curlEnvelope(tt);
+    // stretch
+    const g = tt.grabbed;
+    const rb = k * TP * 3;
+    // root (kinematic, in cage frame)
+    const lx = tt.rootL[0] * S[0], ly = tt.rootL[1] * S[1], lz = tt.rootL[2] * S[2];
+    const rx = m.x + R[0] * lx + R[1] * ly + R[2] * lz;
+    const ry = m.y + R[3] * lx + R[4] * ly + R[5] * lz;
+    const rz = m.z + R[6] * lx + R[7] * ly + R[8] * lz;
+    if (g > 0) {
+      const dist = Math.hypot(tt.target.x - rx, tt.target.y - ry, tt.target.z - rz);
+      const want = Math.min(1.5, Math.max(1, dist / (g * L0 * 0.97)));
+      tt.stretch += (want - tt.stretch) * 0.25;
+    } else {
+      tt.stretch += (1 - tt.stretch) * (1 - Math.exp(-9 * dt));
+    }
+    for (let i = 0; i < TSEG; i++) {
+      let sc = 1;
+      if (tt.stretch > 1.0005) {
+        const ref = g > 0 ? g : tt.lastG || 12;
+        sc = i < ref ? tt.stretch : 1 + (tt.stretch - 1) * Math.exp(-(i - ref + 1) / 2.5);
+      }
+      tSegScale[k * TSEG + i] = sc;
+    }
+    for (let i = 0; i < TP; i++) {
+      const a = i > 0 ? tSegScale[k * TSEG + i - 1] : 1, c = i < TSEG ? tSegScale[k * TSEG + i] : a;
+      tRad[k * TP + i] = baseRad[i] / Math.sqrt((a + c) * 0.5);
+    }
+    // mean velocity for relative damping
+    let mvx = 0, mvy = 0, mvz = 0;
+    for (let i = 1; i < TP; i++) { const b = rb + i * 3; mvx += tvel[b]; mvy += tvel[b + 1]; mvz += tvel[b + 2]; }
+    mvx /= TSEG; mvy /= TSEG; mvz /= TSEG;
+    // integrate
+    for (let i = 0; i < TP; i++) {
+      const b = rb + i * 3;
+      tpv[b] = tx[b]; tpv[b + 1] = tx[b + 1]; tpv[b + 2] = tx[b + 2];
+      if (i === 0) continue;
+      water(tx[b], tx[b + 1], tx[b + 2], _wv);
+      let vx = mvx + (tvel[b] - mvx) * fdi, vy = mvy + (tvel[b + 1] - mvy) * fdi, vz = mvz + (tvel[b + 2] - mvz) * fdi;
+      vx += (_wv[0] - vx) * fd; vy += (_wv[1] - vy) * fd; vz += (_wv[2] - vz) * fd;
+      tx[b] += vx * dt; tx[b + 1] += vy * dt; tx[b + 2] += vz * dt;
+    }
+    tx[rb] = rx; tx[rb + 1] = ry; tx[rb + 2] = rz;
+    // root direction & curl axis in world
+    const dLx = tt.dirL[0], dLy = tt.dirL[1], dLz = tt.dirL[2];
+    let dx = R[0] * dLx + R[1] * dLy + R[2] * dLz, dy = R[3] * dLx + R[4] * dLy + R[5] * dLz, dz = R[6] * dLx + R[7] * dLy + R[8] * dLz;
+    const aLx = tt.axisL[0], aLz = tt.axisL[2];
+    let ax = R[0] * aLx + R[2] * aLz, ay = R[3] * aLx + R[5] * aLz, az = R[6] * aLx + R[8] * aLz;
+    const grabSoft = g > 0 ? 0.25 : 1;
+    const curl = tt.curl, straighten = g > 0 ? 0.25 : 1 / (1 + (tt.stretch - 1) * 3);
+    for (let it = 0; it < 2; it++) {
+      // ---- bending: each segment's direction is the previous one rotated by the target curvature
+      // target directions integrated from the root frame (no feedback through the
+      // chain's own pose → no flutter); positions stay anchored to the real chain
+      let tdx = dx, tdy = dy, tdz = dz;
+      const al = Math.hypot(ax, ay, az) + 1e-12; const qax = ax / al, qay = ay / al, qaz = az / al;
+      for (let i = 0; i < TSEG; i++) {
+        const b = rb + i * 3, bn = b + 3;
+        if (i > 0) {
+          const sn = (i * L0) / TLEN;
+          let kap = kRest[i] * straighten;
+          kap += wave * (2.6 * sn + 0.6) * Math.sin(2 * Math.PI * (sim.t / 2.5) - sn * 7.0 + tt.phase);
+          kap += curl * 46 * Math.pow(sn, 1.35);
+          const ang = kap * L0, ca = Math.cos(ang), sa = Math.sin(ang);
+          const cxv = qay * tdz - qaz * tdy, cyv = qaz * tdx - qax * tdz, czv = qax * tdy - qay * tdx;
+          const nx = tdx * ca + cxv * sa, ny = tdy * ca + cyv * sa, nz = tdz * ca + czv * sa;
+          tdx = nx; tdy = ny; tdz = nz;
+        }
+        if (invMass(k, i + 1) > 0) {
+          const L = L0 * tSegScale[k * TSEG + i];
+          const kk = Math.min(0.95, bendK[i] * bendScale * grabSoft * (1 + curl * 2.5));
+          tx[bn] += (tx[b] + tdx * L - tx[bn]) * kk;
+          tx[bn + 1] += (tx[b + 1] + tdy * L - tx[bn + 1]) * kk;
+          tx[bn + 2] += (tx[b + 2] + tdz * L - tx[bn + 2]) * kk;
+        }
+      }
+      // ---- distance (forward + backward Gauss-Seidel)
+      for (let pass = 0, np = g > 0 ? 6 : 2; pass < np; pass++) {
+        for (let n = 0; n < TSEG; n++) {
+          const i = pass % 2 === 0 ? n : TSEG - 1 - n;
+          const b = rb + i * 3, bn = b + 3;
+          const w1 = invMass(k, i), w2 = invMass(k, i + 1), W = w1 + w2;
+          if (W === 0) continue;
+          const ex = tx[bn] - tx[b], ey = tx[bn + 1] - tx[b + 1], ez = tx[bn + 2] - tx[b + 2];
+          const len = Math.sqrt(ex * ex + ey * ey + ez * ez) + 1e-12;
+          const c = (len - L0 * tSegScale[k * TSEG + i]) / len / W;
+          tx[b] += ex * c * w1; tx[b + 1] += ey * c * w1; tx[b + 2] += ez * c * w1;
+          tx[bn] -= ex * c * w2; tx[bn + 1] -= ey * c * w2; tx[bn + 2] -= ez * c * w2;
+        }
+      }
+      if (g > 0) {
+        const b = rb + g * 3; tx[b] = tt.target.x; tx[b + 1] = tt.target.y; tx[b + 2] = tt.target.z;
+        clampStretch(k, g);
+      }
+      for (let i = 2; i < TP; i++) if (i !== g) worst = Math.max(worst, it === 1 ? collideBody(rb + i * 3, tRad[k * TP + i], i) : (collideBody(rb + i * 3, tRad[k * TP + i], i), 0));
+    }
+  }
+  worst = Math.max(worst, collideTentacles());
+  // final pass: body collisions again so the last word is "outside"
+  for (let k = 0; k < TN; k++) for (let i = 2; i < TP; i++) if (i !== T[k].grabbed) collideBody((k * TP + i) * 3, tRad[k * TP + i], i);
+  for (let k = 0; k < TN; k++) if (T[k].grabbed > 0) clampStretch(k, T[k].grabbed);
+  for (let k = 0; k < TN; k++) {
+    for (let i = 0; i < TP; i++) {
+      const b = (k * TP + i) * 3;
+      let vx = (tx[b] - tpv[b]) * id, vy = (tx[b + 1] - tpv[b + 1]) * id, vz = (tx[b + 2] - tpv[b + 2]) * id;
+      const sp = Math.hypot(vx, vy, vz);
+      if (sp > 4) { vx *= 4 / sp; vy *= 4 / sp; vz *= 4 / sp; }
+      tvel[b] = vx; tvel[b + 1] = vy; tvel[b + 2] = vz;
+    }
+    // strain-rate damping: smooth velocities along the chain (kills chatter, keeps waves)
+    for (let pass = 0; pass < 3; pass++) {
+      for (let i = 1; i < TP; i++) {
+        const b = (k * TP + i) * 3, bp = b - 3, bn = i < TP - 1 ? b + 3 : b - 3;
+        for (let c = 0; c < 3; c++) tvel[b + c] += 0.35 * (0.5 * (tvel[bp + c] + tvel[bn + c]) - tvel[b + c]);
+      }
+    }
+  }
+  return worst;
+}
+
+function stepBehaviour() {
+  // toss → drift → two jet pulses back home
+  const vc = comVelocity();
+  if (sim.mode === 'tossed') {
+    const since = sim.t - sim.releaseT;
+    if ((since > 0.3 && vc < 0.02) || since > 1.5) {
+      sim.mode = 'return'; sim.pulseN = 0; sim.nextPulse = sim.t;
+    }
+  }
+  if (sim.mode === 'return' && sim.t >= sim.nextPulse) {
+    const D = _v.copy(HOME).sub(sim.m);
+    const dist = D.length();
+    if (sim.pulseN >= 2 || dist < 0.006) { sim.mode = 'idle'; }
+    else {
+      const frac = sim.pulseN === 0 ? 0.62 : 1.0;
+      const v0 = Math.min(0.9, dist * 4.6 * frac);
+      D.normalize().multiplyScalar(v0);
+      sim.jet = [D.x, D.y, D.z];
+      sim.pulsePhase0 = sim.t - 0.18 * 2.5;     // squeeze peaks right at the jet
+      sim.pulseN++; sim.nextPulse = sim.t + 0.95;
+    }
+  }
+  if (sim.poke && sim.t - sim.poke.t0 > 3) sim.poke = null;
+}
+function comVelocity() {
+  let vx = 0, vy = 0, vz = 0;
+  for (let i = 0; i < NC; i++) { vx += cvel[i * 3]; vy += cvel[i * 3 + 1]; vz += cvel[i * 3 + 2]; }
+  return Math.hypot(vx, vy, vz) / NC;
+}
+
+function physicsStep(dt) {
+  stepBehaviour();
+  stepCage(dt);
+  const pen = stepTentacles(dt);
+  sim.t += dt;
+  sim.vol = triVolume(cx, sim.m.x, sim.m.y, sim.m.z) / V0;
+  sim.volMin = Math.min(sim.volMin, sim.vol); sim.volMax = Math.max(sim.volMax, sim.vol);
+  sim.maxPen = Math.max(sim.maxPen, pen);
+  for (let k = 0; k < TN; k++) if (T[k].grabbed > 0) {
+    const g = T[k].grabbed; let L = 0;
+    for (let i = 0; i < g; i++) { const b = (k * TP + i) * 3; L += Math.hypot(tx[b + 3] - tx[b], tx[b + 4] - tx[b + 1], tx[b + 5] - tx[b + 2]); }
+    sim.maxStretch = Math.max(sim.maxStretch, L / (g * L0));
+  }
+}
+
+// ================================================================= GEOMETRY
+// ---------------------------------------------------------------- SDF: mantle + 8 root capsules, smooth union
+function sdEllipsoid(px, py, pz, a, b, c) {
+  const k0 = Math.hypot(px / a, py / b, pz / c), k1 = Math.hypot(px / (a * a), py / (b * b), pz / (c * c));
+  return k0 * (k0 - 1) / (k1 + 1e-12);
+}
+function smin(a, b, k) { const h = Math.max(k - Math.abs(a - b), 0) / k; return Math.min(a, b) - h * h * k * 0.25; }
+const rootSeg = T.map((tt) => {
+  const r = [Math.cos(tt.th), Math.sin(tt.th)];
+  const A = [0.036 * r[0], -0.082, 0.036 * r[1]];
+  const B = [tt.rootL[0] + tt.dirL[0] * 0.024, tt.rootL[1] + tt.dirL[1] * 0.024, tt.rootL[2] + tt.dirL[2] * 0.024];
+  return { A, B };
+});
+function sdCapsule(px, py, pz, A, B, r) {
+  const bx = B[0] - A[0], by = B[1] - A[1], bz = B[2] - A[2];
+  const ax = px - A[0], ay = py - A[1], az = pz - A[2];
+  const h = Math.min(1, Math.max(0, (ax * bx + ay * by + az * bz) / (bx * bx + by * by + bz * bz)));
+  return Math.hypot(ax - bx * h, ay - by * h, az - bz * h) - r;
+}
+function sdf(x, y, z) {
+  let d = sdEllipsoid(x, y, z, SEMI[0], SEMI[1], SEMI[2]);
+  d = smin(d, sdEllipsoid(x, y + 0.082, z, 0.078, 0.04, 0.078), 0.04);
+  for (const s of rootSeg) d = smin(d, sdCapsule(x, y, z, s.A, s.B, 0.0205), 0.025);
+  return d;
+}
+function surfaceNets(f, min, max, h) {
+  const nx = Math.ceil((max[0] - min[0]) / h) + 1, ny = Math.ceil((max[1] - min[1]) / h) + 1, nz = Math.ceil((max[2] - min[2]) / h) + 1;
+  const F = new Float32Array(nx * ny * nz);
+  const id = (i, j, k) => i + nx * (j + ny * k);
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++)
+    F[id(i, j, k)] = f(min[0] + i * h, min[1] + j * h, min[2] + k * h);
+  const cell = new Int32Array(nx * ny * nz).fill(-1);
+  const verts = [];
+  const E = []; for (let c = 0; c < 8; c++) for (const bit of [1, 2, 4]) if (!(c & bit)) E.push(c, c | bit);
+  const cv = new Float32Array(8);
+  for (let k = 0; k < nz - 1; k++) for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+    let mask = 0;
+    for (let c = 0; c < 8; c++) { cv[c] = F[id(i + (c & 1), j + ((c >> 1) & 1), k + ((c >> 2) & 1))]; if (cv[c] < 0) mask |= 1 << c; }
+    if (mask === 0 || mask === 255) continue;
+    let sx = 0, sy = 0, sz = 0, n = 0;
+    for (let e = 0; e < 24; e += 2) {
+      const a = E[e], b = E[e + 1];
+      if ((cv[a] < 0) === (cv[b] < 0)) continue;
+      const t = cv[a] / (cv[a] - cv[b]);
+      sx += (a & 1) + (((b & 1) - (a & 1)) * t); sy += ((a >> 1) & 1) + ((((b >> 1) & 1) - ((a >> 1) & 1)) * t); sz += ((a >> 2) & 1) + ((((b >> 2) & 1) - ((a >> 2) & 1)) * t);
+      n++;
+    }
+    cell[id(i, j, k)] = verts.length / 3;
+    verts.push(min[0] + (i + sx / n) * h, min[1] + (j + sy / n) * h, min[2] + (k + sz / n) * h);
+  }
+  const idx = [];
+  const quad = (a, b, c, d, flip) => { if (a < 0 || b < 0 || c < 0 || d < 0) return; if (flip) idx.push(a, d, c, a, c, b); else idx.push(a, b, c, a, c, d); };
+  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) {
+    const v = F[id(i, j, k)] < 0;
+    if (v !== (F[id(i + 1, j, k)] < 0)) quad(cell[id(i, j - 1, k - 1)], cell[id(i, j, k - 1)], cell[id(i, j, k)], cell[id(i, j - 1, k)], !v);
+    if (v !== (F[id(i, j + 1, k)] < 0)) quad(cell[id(i - 1, j, k - 1)], cell[id(i - 1, j, k)], cell[id(i, j, k)], cell[id(i, j, k - 1)], !v);
+    if (v !== (F[id(i, j, k + 1)] < 0)) quad(cell[id(i - 1, j - 1, k)], cell[id(i, j - 1, k)], cell[id(i, j, k)], cell[id(i - 1, j, k)], !v);
+  }
+  // project onto the surface
+  const e = 1e-4;
+  for (let v = 0; v < verts.length; v += 3) {
+    for (let it = 0; it < 3; it++) {
+      const x = verts[v], y = verts[v + 1], z = verts[v + 2];
+      const d = f(x, y, z);
+      const gx = (f(x + e, y, z) - f(x - e, y, z)) / (2 * e), gy = (f(x, y + e, z) - f(x, y - e, z)) / (2 * e), gz = (f(x, y, z + e) - f(x, y, z - e)) / (2 * e);
+      const g2 = gx * gx + gy * gy + gz * gz + 1e-12;
+      verts[v] -= d * gx / g2; verts[v + 1] -= d * gy / g2; verts[v + 2] -= d * gz / g2;
+    }
+  }
+  return { pos: new Float32Array(verts), index: new Uint32Array(idx) };
+}
+
+// ---------------------------------------------------------------- skin binding to cage (+ tentacle roots)
+function bindToCage(px, py, pz, K, out) {
+  // K nearest surface particles; weight 1/(d²+ε)
+  const bi = new Int32Array(K).fill(-1), bd = new Float64Array(K).fill(1e9);
+  for (let i = 0; i < NS; i++) {
+    const d = (cq[i * 3] - px) ** 2 + (cq[i * 3 + 1] - py) ** 2 + (cq[i * 3 + 2] - pz) ** 2;
+    if (d < bd[K - 1]) {
+      let j = K - 1; while (j > 0 && bd[j - 1] > d) { bd[j] = bd[j - 1]; bi[j] = bi[j - 1]; j--; }
+      bd[j] = d; bi[j] = i;
+    }
+  }
+  let ws = 0; const w = new Float64Array(K);
+  for (let j = 0; j < K; j++) { w[j] = 1 / (bd[j] + 2.5e-5); ws += w[j]; }
+  let ox = px, oy = py, oz = pz;
+  for (let j = 0; j < K; j++) { w[j] /= ws; ox -= w[j] * cq[bi[j] * 3]; oy -= w[j] * cq[bi[j] * 3 + 1]; oz -= w[j] * cq[bi[j] * 3 + 2]; }
+  out.i = bi; out.w = w; out.o = [ox, oy, oz];
+  return out;
+}
+const SK = 4;
+function makeSkin(pos, withRoots) {
+  const n = pos.length / 3;
+  const sk = { n, I: new Int32Array(n * SK), W: new Float32Array(n * SK), O: new Float32Array(n * 3), rest: pos.slice(),
+    RK: new Int8Array(n).fill(-1), RW: new Float32Array(n), RO: new Float32Array(n * 3) };
+  const tmp = {};
+  for (let v = 0; v < n; v++) {
+    const px = pos[v * 3], py = pos[v * 3 + 1], pz = pos[v * 3 + 2];
+    bindToCage(px, py, pz, SK, tmp);
+    for (let j = 0; j < SK; j++) { sk.I[v * SK + j] = tmp.i[j]; sk.W[v * SK + j] = tmp.w[j]; }
+    sk.O[v * 3] = tmp.o[0]; sk.O[v * 3 + 1] = tmp.o[1]; sk.O[v * 3 + 2] = tmp.o[2];
+    if (!withRoots) continue;
+    let best = -1, bw = 0;
+    for (let k = 0; k < TN; k++) {
+      const { A, B } = rootSeg[k];
+      const bx = B[0] - A[0], by = B[1] - A[1], bz = B[2] - A[2];
+      const h = ((px - A[0]) * bx + (py - A[1]) * by + (pz - A[2]) * bz) / (bx * bx + by * by + bz * bz);
+      const hc = Math.min(1.2, Math.max(0, h));
+      const dd = Math.hypot(px - A[0] - bx * hc, py - A[1] - by * hc, pz - A[2] - bz * hc);
+      if (dd > 0.034) continue;
+      const w = smooth(0.25, 1.0, h) * (1 - smooth(0.026, 0.034, dd));
+      if (w > bw) { bw = w; best = k; }
+    }
+    if (best >= 0 && bw > 0.001) {
+      sk.RK[v] = best; sk.RW[v] = bw;
+      const tt = T[best];
+      sk.RO[v * 3] = px - tt.rootL[0]; sk.RO[v * 3 + 1] = py - tt.rootL[1]; sk.RO[v * 3 + 2] = pz - tt.rootL[2];
+    }
+  }
+  return sk;
+}
+const RS = new Float64Array(9);
+const rootQ = Array.from({ length: TN }, () => new Float64Array(9));
+function prepFrame() {
+  const R = sim.R, S = sim.S;
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) RS[r * 3 + c] = R[r * 3 + c] * S[c];
+  for (let k = 0; k < TN; k++) {
+    const tt = T[k];
+    const dL = tt.dirL;
+    _v.set(R[0] * dL[0] + R[1] * dL[1] + R[2] * dL[2], R[3] * dL[0] + R[4] * dL[1] + R[5] * dL[2], R[6] * dL[0] + R[7] * dL[1] + R[8] * dL[2]).normalize();
+    const b = k * TP * 3;
+    _v2.set(tx[b + 3] - tx[b], tx[b + 4] - tx[b + 1], tx[b + 5] - tx[b + 2]).normalize();
+    _q.setFromUnitVectors(_v, _v2);
+    quatToMat(_q, _M);
+    // rootQ = Q * R  (world rotation for the root region)
+    const Q = rootQ[k];
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) Q[r * 3 + c] = _M[r * 3] * R[c] + _M[r * 3 + 1] * R[3 + c] + _M[r * 3 + 2] * R[6 + c];
+  }
+}
+function skinPoint(sk, v, out, o3) {
+  let x = 0, y = 0, z = 0;
+  for (let j = 0; j < SK; j++) {
+    const i = sk.I[v * SK + j] * 3, w = sk.W[v * SK + j];
+    x += cx[i] * w; y += cx[i + 1] * w; z += cx[i + 2] * w;
+  }
+  const ox = sk.O[v * 3], oy = sk.O[v * 3 + 1], oz = sk.O[v * 3 + 2];
+  x += RS[0] * ox + RS[1] * oy + RS[2] * oz;
+  y += RS[3] * ox + RS[4] * oy + RS[5] * oz;
+  z += RS[6] * ox + RS[7] * oy + RS[8] * oz;
+  const rk = sk.RK[v];
+  if (rk >= 0) {
+    const Q = rootQ[rk], b = rk * TP * 3, w = sk.RW[v];
+    const rx = sk.RO[v * 3], ry = sk.RO[v * 3 + 1], rz = sk.RO[v * 3 + 2];
+    const px = tx[b] + Q[0] * rx + Q[1] * ry + Q[2] * rz;
+    const py = tx[b + 1] + Q[3] * rx + Q[4] * ry + Q[5] * rz;
+    const pz = tx[b + 2] + Q[6] * rx + Q[7] * ry + Q[8] * rz;
+    x += (px - x) * w; y += (py - y) * w; z += (pz - z) * w;
+  }
+  out[o3] = x; out[o3 + 1] = y; out[o3 + 2] = z;
+}
+function computeNormals(pos, index, nrm) {
+  nrm.fill(0);
+  for (let t = 0; t < index.length; t += 3) {
+    const a = index[t] * 3, b = index[t + 1] * 3, c = index[t + 2] * 3;
+    const e1x = pos[b] - pos[a], e1y = pos[b + 1] - pos[a + 1], e1z = pos[b + 2] - pos[a + 2];
+    const e2x = pos[c] - pos[a], e2y = pos[c + 1] - pos[a + 1], e2z = pos[c + 2] - pos[a + 2];
+    const nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+    nrm[a] += nx; nrm[a + 1] += ny; nrm[a + 2] += nz; nrm[b] += nx; nrm[b + 1] += ny; nrm[b + 2] += nz; nrm[c] += nx; nrm[c + 1] += ny; nrm[c + 2] += nz;
+  }
+  for (let i = 0; i < nrm.length; i += 3) {
+    const l = Math.hypot(nrm[i], nrm[i + 1], nrm[i + 2]) || 1;
+    nrm[i] /= l; nrm[i + 1] /= l; nrm[i + 2] /= l;
+  }
+}
+
+// ---------------------------------------------------------------- mantle mesh
+const nets = surfaceNets(sdf, [-0.15, -0.17, -0.15], [0.15, 0.14, 0.15], 0.0048);
+{ // orientation check (signed volume must be positive)
+  let V = 0; const p = nets.pos, I = nets.index;
+  for (let t = 0; t < I.length; t += 3) {
+    const a = I[t] * 3, b = I[t + 1] * 3, c = I[t + 2] * 3;
+    V += p[a] * (p[b + 1] * p[c + 2] - p[b + 2] * p[c + 1]) + p[a + 1] * (p[b + 2] * p[c] - p[b] * p[c + 2]) + p[a + 2] * (p[b] * p[c + 1] - p[b + 1] * p[c]);
+  }
+  if (V < 0) for (let t = 0; t < I.length; t += 3) { const x = I[t + 1]; I[t + 1] = I[t + 2]; I[t + 2] = x; }
+}
+const mantleSkin = makeSkin(nets.pos, true);
+const mantleGeo = new THREE.BufferGeometry();
+const mantlePos = new Float32Array(nets.pos.length), mantleNrm = new Float32Array(nets.pos.length);
+mantleGeo.setAttribute('position', new THREE.BufferAttribute(mantlePos, 3).setUsage(THREE.DynamicDrawUsage));
+mantleGeo.setAttribute('normal', new THREE.BufferAttribute(mantleNrm, 3).setUsage(THREE.DynamicDrawUsage));
+mantleGeo.setIndex(new THREE.BufferAttribute(nets.index, 1));
+mantleGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 0.3);
+const restNrm = new Float32Array(nets.pos.length);
+computeNormals(nets.pos, nets.index, restNrm);
+const mantle = new THREE.Mesh(mantleGeo, jellyMat);
+mantle.frustumCulled = false;
+scene.add(mantle);
+
+// opaque core at 55% mantle scale
+const coreGeo = new THREE.SphereGeometry(1, 40, 28);
+{
+  const p = coreGeo.attributes.position;
+  for (let i = 0; i < p.count; i++) p.setXYZ(i, p.getX(i) * SEMI[0] * 0.55, p.getY(i) * SEMI[1] * 0.55 + 0.004, p.getZ(i) * SEMI[2] * 0.55);
+}
+const coreSkin = makeSkin(coreGeo.attributes.position.array, false);
+coreGeo.attributes.position.setUsage(THREE.DynamicDrawUsage);
+const core = new THREE.Mesh(coreGeo, coreMat);
+core.frustumCulled = false; core.castShadow = true;
+coreGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 0.2);
+scene.add(core);
+
+// ---------------------------------------------------------------- tentacle tubes + suckers
+const RINGS_PER = 2, TR = TSEG * RINGS_PER + 1, RAD = 12;
+const tubes = [];
+const tubeIndex = [];
+for (let m = 0; m < TR - 1; m++) for (let j = 0; j < RAD; j++) {
+  const a = m * RAD + j, b = m * RAD + (j + 1) % RAD, c = (m + 1) * RAD + j, d = (m + 1) * RAD + (j + 1) % RAD;
+  tubeIndex.push(a, b, c, b, d, c);
+}
+const tipV = TR * RAD;
+for (let j = 0; j < RAD; j++) tubeIndex.push((TR - 1) * RAD + j, (TR - 1) * RAD + (j + 1) % RAD, tipV);
+for (let k = 0; k < TN; k++) {
+  const g = new THREE.BufferGeometry();
+  const pos = new Float32Array((TR * RAD + 1) * 3), nrm = new Float32Array((TR * RAD + 1) * 3);
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3).setUsage(THREE.DynamicDrawUsage));
+  g.setIndex(tubeIndex);
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1);
+  const mesh = new THREE.Mesh(g, jellyMat);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  tubes.push({ mesh, pos, nrm });
+}
+// sucker cup (lathe)
+const cupPts = [[0, 0.1], [0.55, 0.16], [0.9, 0.42], [1.0, 0.72], [0.9, 0.98], [0.72, 1.0], [0.56, 0.84], [0.3, 0.74], [0.0, 0.7]].map(([x, y]) => new THREE.Vector2(x, y));
+const cupGeo = new THREE.LatheGeometry(cupPts, 14);
+const SUCK_FROM = 5;
+const SUCK_PER = TR - 1 - SUCK_FROM;   // rings 5..47
+const suckers = new THREE.InstancedMesh(cupGeo, suckerMat, TN * SUCK_PER);
+suckers.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+suckers.frustumCulled = false;
+scene.add(suckers);
+
+const ringC = new Float64Array(TR * 3), ringT = new Float64Array(TR * 3), ringN = new Float64Array(TR * 3), ringB = new Float64Array(TR * 3), ringR = new Float64Array(TR);
+const _m4 = new THREE.Matrix4(), _sc = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
+function cr(p0, p1, p2, p3, u) { const u2 = u * u, u3 = u2 * u; return 0.5 * (2 * p1 + (-p0 + p2) * u + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u2 + (-p0 + 3 * p1 - 3 * p2 + p3) * u3); }
+function crd(p0, p1, p2, p3, u) { return 0.5 * ((-p0 + p2) + 2 * (2 * p0 - 5 * p1 + 4 * p2 - p3) * u + 3 * (-p0 + 3 * p1 - 3 * p2 + p3) * u * u); }
+function P(k, i, a) {
+  if (i < 0) return 2 * tx[(k * TP) * 3 + a] - tx[(k * TP + 1) * 3 + a];
+  if (i >= TP) return 2 * tx[(k * TP + TP - 1) * 3 + a] - tx[(k * TP + TP - 2) * 3 + a];
+  return tx[(k * TP + i) * 3 + a];
+}
+function updateTentacleMeshes() {
+  const R = sim.R;
+  let si = 0;
+  for (let k = 0; k < TN; k++) {
+    const tt = T[k], tb = tubes[k];
+    for (let m = 0; m < TR; m++) {
+      let i = Math.floor(m / RINGS_PER), u = (m % RINGS_PER) / RINGS_PER;
+      if (i >= TSEG) { i = TSEG - 1; u = 1; }
+      let tl = 0;
+      for (let a = 0; a < 3; a++) {
+        const p0 = P(k, i - 1, a), p1 = P(k, i, a), p2 = P(k, i + 1, a), p3 = P(k, i + 2, a);
+        ringC[m * 3 + a] = cr(p0, p1, p2, p3, u);
+        ringT[m * 3 + a] = crd(p0, p1, p2, p3, u);
+        tl += ringT[m * 3 + a] ** 2;
+      }
+      tl = Math.sqrt(tl) + 1e-12;
+      ringT[m * 3] /= tl; ringT[m * 3 + 1] /= tl; ringT[m * 3 + 2] /= tl;
+      const ri = i + u;
+      const i0 = Math.min(TP - 1, Math.floor(ri)), i1 = Math.min(TP - 1, i0 + 1), f = ri - i0;
+      ringR[m] = tRad[k * TP + i0] * (1 - f) + tRad[k * TP + i1] * f;
+      // frame: parallel-transport the curl axis
+      let bx, by, bz;
+      if (m === 0) { const aL = tt.axisL; bx = R[0] * aL[0] + R[2] * aL[2]; by = R[3] * aL[0] + R[5] * aL[2]; bz = R[6] * aL[0] + R[8] * aL[2]; }
+      else { bx = ringB[(m - 1) * 3]; by = ringB[(m - 1) * 3 + 1]; bz = ringB[(m - 1) * 3 + 2]; }
+      const tX = ringT[m * 3], tY = ringT[m * 3 + 1], tZ = ringT[m * 3 + 2];
+      const d = bx * tX + by * tY + bz * tZ; bx -= tX * d; by -= tY * d; bz -= tZ * d;
+      const bl = Math.hypot(bx, by, bz) + 1e-12; bx /= bl; by /= bl; bz /= bl;
+      ringB[m * 3] = bx; ringB[m * 3 + 1] = by; ringB[m * 3 + 2] = bz;
+      // N = B × T  (aboral side)
+      ringN[m * 3] = by * tZ - bz * tY; ringN[m * 3 + 1] = bz * tX - bx * tZ; ringN[m * 3 + 2] = bx * tY - by * tX;
+    }
+    const pos = tb.pos, nrm = tb.nrm;
+    for (let m = 0; m < TR; m++) {
+      const r = ringR[m];
+      for (let j = 0; j < RAD; j++) {
+        const ph = 2 * Math.PI * j / RAD, c = Math.cos(ph), s = Math.sin(ph);
+        const dx = ringN[m * 3] * c + ringB[m * 3] * s, dy = ringN[m * 3 + 1] * c + ringB[m * 3 + 1] * s, dz = ringN[m * 3 + 2] * c + ringB[m * 3 + 2] * s;
+        const o = (m * RAD + j) * 3;
+        pos[o] = ringC[m * 3] + dx * r; pos[o + 1] = ringC[m * 3 + 1] + dy * r; pos[o + 2] = ringC[m * 3 + 2] + dz * r;
+        nrm[o] = dx; nrm[o + 1] = dy; nrm[o + 2] = dz;
+      }
+    }
+    const e = TR - 1, o = tipV * 3;
+    pos[o] = ringC[e * 3] + ringT[e * 3] * ringR[e]; pos[o + 1] = ringC[e * 3 + 1] + ringT[e * 3 + 1] * ringR[e]; pos[o + 2] = ringC[e * 3 + 2] + ringT[e * 3 + 2] * ringR[e];
+    nrm[o] = ringT[e * 3]; nrm[o + 1] = ringT[e * 3 + 1]; nrm[o + 2] = ringT[e * 3 + 2];
+    tb.mesh.geometry.attributes.position.needsUpdate = true;
+    tb.mesh.geometry.attributes.normal.needsUpdate = true;
+    // suckers: two staggered rows on the oral side (−N)
+    for (let m = SUCK_FROM; m < TR - 1; m++) {
+      const side = (m % 2 === 0) ? 0.52 : -0.52, c = Math.cos(side), s = Math.sin(side);
+      const dx = -ringN[m * 3] * c + ringB[m * 3] * s, dy = -ringN[m * 3 + 1] * c + ringB[m * 3 + 1] * s, dz = -ringN[m * 3 + 2] * c + ringB[m * 3 + 2] * s;
+      const r = ringR[m], sr = r * 0.4;
+      _v.set(dx, dy, dz);
+      _q.setFromUnitVectors(_up, _v);
+      _v2.set(ringC[m * 3] + dx * (r - sr * 0.35), ringC[m * 3 + 1] + dy * (r - sr * 0.35), ringC[m * 3 + 2] + dz * (r - sr * 0.35));
+      _sc.set(sr, sr * 0.9, sr);
+      _m4.compose(_v2, _q, _sc);
+      suckers.setMatrixAt(si++, _m4);
+    }
+  }
+  suckers.instanceMatrix.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------- eyes
+const eyes = [];
+{
+  const RE = 0.029;
+  const scleraMat = new THREE.MeshPhysicalMaterial({ color: PAL.suckers, roughness: 0.18, clearcoat: 1, clearcoatRoughness: 0.03, emissive: col(PAL.suckers), emissiveIntensity: 0.12 });
+  const irisMat = new THREE.MeshPhysicalMaterial({ color: 0x2a1862, roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.02 });
+  const pupilMat = new THREE.MeshPhysicalMaterial({ color: 0x0a0616, roughness: 0.15, clearcoat: 1, clearcoatRoughness: 0.02 });
+  const lidMat = new THREE.MeshStandardMaterial({ color: 0xA486F2, roughness: 0.35, side: THREE.DoubleSide, emissive: col(PAL.jelly), emissiveIntensity: 0.12 });
+  const glintMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false, fog: false });
+  const cap = (r, th) => { const g = new THREE.SphereGeometry(r, 32, 12, 0, Math.PI * 2, 0, th); g.rotateX(Math.PI / 2); return g; };
+  for (const sgn of [-1, 1]) {
+    const dir = new THREE.Vector3(0.5 * sgn, -0.22, 0.84).normalize();
+    const t = 1 / Math.sqrt((dir.x / SEMI[0]) ** 2 + (dir.y / SEMI[1]) ** 2 + (dir.z / SEMI[2]) ** 2);
+    const p = dir.clone().multiplyScalar(t);
+    const n = new THREE.Vector3(p.x / SEMI[0] ** 2, p.y / SEMI[1] ** 2, p.z / SEMI[2] ** 2).normalize();
+    const center = p.clone().addScaledVector(n, -0.009);
+    const g = new THREE.Group();
+    const ball = new THREE.Group();
+    const sclera = new THREE.Mesh(new THREE.SphereGeometry(RE, 32, 20), scleraMat);
+    const iris = new THREE.Mesh(cap(RE * 1.006, 0.78), irisMat);
+    const pupil = new THREE.Mesh(cap(RE * 1.012, 0.44), pupilMat);
+    ball.add(sclera, iris, pupil);
+    const glint = new THREE.Mesh(new THREE.SphereGeometry(RE * 0.17, 12, 8), glintMat);
+    glint.position.set(-0.36 * RE, 0.42 * RE, 0.86 * RE);
+    const glint2 = new THREE.Mesh(new THREE.SphereGeometry(RE * 0.08, 10, 6), glintMat);
+    glint2.position.set(0.3 * RE, -0.3 * RE, 0.93 * RE);
+    const upper = new THREE.Mesh(new THREE.SphereGeometry(RE * 1.09, 32, 12, 0, Math.PI * 2, 0, Math.PI / 2), lidMat);
+    const lower = new THREE.Mesh(new THREE.SphereGeometry(RE * 1.09, 32, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2), lidMat);
+    g.add(ball, glint, glint2, upper, lower);
+    g.traverse((o) => { if (o.isMesh) o.castShadow = o !== glint && o !== glint2; });
+    scene.add(g);
+    const sk = makeSkin(new Float32Array([center.x, center.y, center.z]), false);
+    const restQ = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(new THREE.Vector3(), n.clone().negate(), new THREE.Vector3(0, 1, 0)));
+    eyes.push({ g, ball, upper, lower, sk, restQ, look: new THREE.Quaternion(), sgn });
+  }
+}
+const lookTarget = new THREE.Vector3(0, 0, 2);
+const _p3 = new Float32Array(3), _gq = new THREE.Quaternion(), _inv = new THREE.Quaternion(), _fwd = new THREE.Vector3(0, 0, 1);
+function updateEyes(dt) {
+  // blink + squint
+  if (sim.t > sim.blinkNext) { sim.blinkT = sim.t; sim.blinkNext = sim.t + 2.8 + Math.random() * 3.5; }
+  const bk = sim.t - sim.blinkT;
+  const blink = bk >= 0 && bk < 0.16 ? Math.sin(Math.PI * bk / 0.16) : 0;
+  const sq = sim.t - sim.squintT;
+  const squint = sq >= 0 && sq < 1.8 ? (sq < 0.12 ? sq / 0.12 : 1 - smooth(0.9, 1.8, sq)) : 0;
+  const closeUp = Math.max(blink, squint * 0.78), closeLo = Math.max(blink * 0.7, squint * 0.62);
+  sim.squint = squint;
+  _q.set(0, 0, 0, 1);
+  _gq.setFromRotationMatrix(_m4.set(sim.R[0], sim.R[1], sim.R[2], 0, sim.R[3], sim.R[4], sim.R[5], 0, sim.R[6], sim.R[7], sim.R[8], 0, 0, 0, 0, 1));
+  for (const e of eyes) {
+    skinPoint(e.sk, 0, _p3, 0);
+    e.g.position.set(_p3[0], _p3[1], _p3[2]);
+    e.g.quaternion.copy(_gq).multiply(e.restQ);
+    e.upper.rotation.x = -1.22 * (1 - closeUp);
+    e.lower.rotation.x = 1.15 * (1 - closeLo);
+    // look at the pointer
+    e.g.updateMatrixWorld();
+    _v.copy(lookTarget).sub(e.g.position).applyQuaternion(_inv.copy(e.g.quaternion).invert()).normalize();
+    const ang = _fwd.angleTo(_v);
+    if (ang > 0.62) _v.lerp(_fwd, 1 - 0.62 / ang).normalize();
+    _q2.setFromUnitVectors(_fwd, _v);
+    e.look.slerp(_q2, 1 - Math.exp(-dt * 12));
+    e.ball.quaternion.copy(e.look);
+  }
+}
+
+// ---------------------------------------------------------------- per-frame hero update
+function updateHero(dt) {
+  prepFrame();
+  // mantle surface + ripple after a poke
+  const pk = sim.poke;
+  let rip = null;
+  if (pk) {
+    const tau = sim.t - pk.t0 - pk.hold * 0.6;
+    if (tau > 0 && tau < 2.2) rip = { tau, amp: 0.0042 * Math.exp(-tau / 0.5), front: 0.02 + tau * 0.26 };
+  }
+  const R = sim.R;
+  for (let v = 0; v < mantleSkin.n; v++) {
+    skinPoint(mantleSkin, v, mantlePos, v * 3);
+    if (rip) {
+      const rx = mantleSkin.rest[v * 3] - pk.local[0], ry = mantleSkin.rest[v * 3 + 1] - pk.local[1], rz = mantleSkin.rest[v * 3 + 2] - pk.local[2];
+      const d = Math.sqrt(rx * rx + ry * ry + rz * rz);
+      if (d < rip.front) {
+        const a = rip.amp * Math.sin(2 * Math.PI * (d / 0.045 - rip.tau / 0.17)) * Math.exp(-d / 0.14) * smooth(rip.front, rip.front - 0.03, d) * smooth(0.0, 0.015, d);
+        const nx = restNrm[v * 3], ny = restNrm[v * 3 + 1], nz = restNrm[v * 3 + 2];
+        mantlePos[v * 3] += (R[0] * nx + R[1] * ny + R[2] * nz) * a;
+        mantlePos[v * 3 + 1] += (R[3] * nx + R[4] * ny + R[5] * nz) * a;
+        mantlePos[v * 3 + 2] += (R[6] * nx + R[7] * ny + R[8] * nz) * a;
+      }
+    }
+  }
+  computeNormals(mantlePos, nets.index, mantleNrm);
+  mantleGeo.attributes.position.needsUpdate = true;
+  mantleGeo.attributes.normal.needsUpdate = true;
+  mantleGeo.boundingSphere.center.copy(sim.m);
+  const cp = coreGeo.attributes.position.array;
+  for (let v = 0; v < coreSkin.n; v++) skinPoint(coreSkin, v, cp, v * 3);
+  coreGeo.attributes.position.needsUpdate = true;
+  coreGeo.computeVertexNormals();
+  coreGeo.boundingSphere.center.copy(sim.m);
+  updateTentacleMeshes();
+  updateEyes(dt);
+  // flush toward accent for 0.6 s after a poke
+  const ft = sim.t - sim.flushT;
+  const fl = ft >= 0 && ft < 0.6 ? Math.sin(Math.PI * ft / 0.6) : 0;
+  jellyMat.color.copy(BASE.jelly).lerp(BASE.accent, fl * 0.75);
+  jellyMat.attenuationColor.copy(BASE.att).lerp(BASE.accent, fl * 0.85);
+  jellyMat.emissive.copy(BASE.emis).lerp(BASE.accent, fl);
+  jellyMat.emissiveIntensity = 0.17 + fl * 0.25;
+  coreMat.color.copy(BASE.core).lerp(BASE.accent, fl * 0.6);
+  // contact shadow follows the hero
+  let sx = 0, sz = 0, minY = 1e9;
+  for (let k = 0; k < TN; k++) for (let i = 0; i < TP; i += 4) { const b = (k * TP + i) * 3; sx += tx[b]; sz += tx[b + 2]; minY = Math.min(minY, tx[b + 1]); }
+  const n = TN * Math.ceil(TP / 4);
+  sx = (sx / n + sim.m.x) * 0.5; sz = (sz / n + sim.m.z) * 0.5;
+  const h = Math.max(0, minY - SEABED);
+  shadowU.value.set(sx, sz, 0.62 * Math.exp(-h / 0.25), 0.13 + h * 0.25);
+}
+
+// ================================================================= INTERACTION
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const plane = new THREE.Plane();
+const pointer = { x: 0, y: 0, inside: false, hist: [] };
+let firstUsed = false;
+const hint = document.getElementById('hint');
+function used() { if (!firstUsed) { firstUsed = true; hint.classList.add('gone'); } }
+
+function setNDC(e) {
+  const r = canvas.getBoundingClientRect();
+  ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+}
+function toScreen(x, y, z, out) {
+  _v3.set(x, y, z).project(camera);
+  out.x = (_v3.x + 1) * 0.5 * innerWidth; out.y = (1 - _v3.y) * 0.5 * innerHeight; out.z = _v3.z;
+  return out;
+}
+function pxPerMeterAt(p) {
+  const d = camera.position.distanceTo(p);
+  return innerHeight / (2 * d * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+}
+const _s = { x: 0, y: 0, z: 0 };
+function pickTentacle(cxp, cyp) {
+  let best = null, bd = 1e9;
+  const ppm = pxPerMeterAt(sim.m);
+  for (let k = 0; k < TN; k++) for (let i = 3; i < TP; i++) {
+    const b = (k * TP + i) * 3;
+    toScreen(tx[b], tx[b + 1], tx[b + 2], _s);
+    const d = Math.hypot(_s.x - cxp, _s.y - cyp);
+    const lim = tRad[k * TP + i] * ppm + 16;
+    if (d < lim && d - lim < bd) { bd = d - lim; best = { k, i, dist: camera.position.distanceTo(_v.set(tx[b], tx[b + 1], tx[b + 2])) }; }
+  }
+  return best;
+}
+function onDown(e) {
+  if (grab.type) return;
+  setNDC(e);
+  const hit = raycaster.intersectObject(mantle, false)[0];
+  const tp = pickTentacle(e.clientX, e.clientY);
+  if (tp && (!hit || tp.dist < hit.distance + 0.015)) {
+    const tt = T[tp.k];
+    const b = (tp.k * TP + tp.i) * 3;
+    grab.type = 'tent'; grab.k = tp.k; grab.g = tp.i; grab.id = e.pointerId;
+    tt.grabbed = tp.i; tt.lastG = tp.i;
+    tt.target.set(tx[b], tx[b + 1], tx[b + 2]);
+    camera.getWorldDirection(_v); plane.setFromNormalAndCoplanarPoint(_v, tt.target);
+  } else if (hit) {
+    grab.type = 'mantle'; grab.id = e.pointerId; grab.moved = false; grab.sx = e.clientX; grab.sy = e.clientY; grab.t0 = sim.t;
+    poke(hit);
+    camera.getWorldDirection(_v); plane.setFromNormalAndCoplanarPoint(_v, hit.point);
+    grab.target.copy(hit.point);
+    grab.parts = []; grab.w = []; grab.off = [];
+    for (let i = 0; i < NC; i++) {
+      const dx = cx[i * 3] - hit.point.x, dy = cx[i * 3 + 1] - hit.point.y, dz = cx[i * 3 + 2] - hit.point.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      const w = Math.exp(-d2 / (2 * 0.05 * 0.05));
+      if (w > 0.05) { grab.parts.push(i); grab.w.push(w); grab.off.push([dx, dy, dz]); }
+    }
+  } else return;
+  used();
+  controls.enabled = false;
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* synthetic pointers */ }
+  e.preventDefault();
+}
+function poke(hit) {
+  const n = hit.face.normal.clone();   // mesh is in world space
+  const local = _v.copy(hit.point).sub(sim.m);
+  // back to rest-local (inverse of R·S)
+  const R = sim.R, S = sim.S;
+  const lx = (R[0] * local.x + R[3] * local.y + R[6] * local.z) / S[0];
+  const ly = (R[1] * local.x + R[4] * local.y + R[7] * local.z) / S[1];
+  const lz = (R[2] * local.x + R[5] * local.y + R[8] * local.z) / S[2];
+  const w = new Float32Array(NC);
+  for (let i = 0; i < NS; i++) {
+    const d2 = (cx[i * 3] - hit.point.x) ** 2 + (cx[i * 3 + 1] - hit.point.y) ** 2 + (cx[i * 3 + 2] - hit.point.z) ** 2;
+    w[i] = Math.exp(-d2 / (2 * 0.028 * 0.028));
+    if (w[i] < 0.01) w[i] = 0;
+  }
+  let wSum = 0; for (let i = 0; i < NC; i++) wSum += w[i];
+  sim.poke = { t0: sim.t, hold: 0.16, n, depth: 0.029, w, wSum, local: [lx, ly, lz], point: hit.point.clone() };
+  sim.flushT = sim.t;
+}
+function onMove(e) {
+  setNDC(e);
+  pointer.inside = true;
+  // eyes follow pointer on a plane through the hero
+  camera.getWorldDirection(_v2);
+  const pl = new THREE.Plane().setFromNormalAndCoplanarPoint(_v2, sim.m);
+  const wp = new THREE.Vector3();
+  if (raycaster.ray.intersectPlane(pl, wp)) lookTarget.copy(wp).addScaledVector(_v2, -0.35);
+  if (grab.type && e.pointerId === grab.id) {
+    const p = new THREE.Vector3();
+    if (!raycaster.ray.intersectPlane(plane, p)) return;
+    if (grab.type === 'tent') {
+      const tt = T[grab.k];
+      const rb = grab.k * TP * 3;
+      const rx = tx[rb], ry = tx[rb + 1], rz = tx[rb + 2];
+      const maxL = grab.g * L0 * 1.44;
+      _v.set(p.x - rx, p.y - ry, p.z - rz);
+      if (_v.length() > maxL) _v.setLength(maxL);
+      tt.target.set(rx + _v.x, ry + _v.y, rz + _v.z);
+    } else {
+      if (!grab.moved && Math.hypot(e.clientX - grab.sx, e.clientY - grab.sy) > 8) { grab.moved = true; if (sim.poke) sim.poke.hold = Math.min(sim.poke.hold, sim.t - sim.poke.t0); }
+      _v.copy(p).sub(HOME);
+      const el = Math.hypot(_v.x / sim.boundX, _v.y / sim.boundY, _v.z / sim.boundX);
+      if (el > 1) _v.multiplyScalar(1 / el);
+      grab.target.copy(HOME).add(_v);
+    }
+    return;
+  }
+  // tickle: fast sweep across tentacles (> 1.5 m/s on the hero plane)
+  const evs = (e.getCoalescedEvents && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
+  const now = e.timeStamp / 1000;
+  for (const ce of evs) {
+    setNDC(ce);
+    const cp = new THREE.Vector3();
+    if (!raycaster.ray.intersectPlane(pl, cp)) continue;
+    const ct = ce.timeStamp / 1000;
+    const last = pointer.hist[pointer.hist.length - 1];
+    if (last && ct <= last.t) continue;
+    pointer.hist.push({ t: ct, p: cp, x: ce.clientX, y: ce.clientY });
+  }
+  while (pointer.hist.length > 2 && now - pointer.hist[0].t > 0.06) pointer.hist.shift();
+  const h0 = pointer.hist[0], h1 = pointer.hist[pointer.hist.length - 1];
+  if (pointer.hist.length >= 2 && h1.t - h0.t > 0.004) {
+    const speed = h0.p.distanceTo(h1.p) / (h1.t - h0.t);
+    pointer.speed = speed;
+    if (speed > 1.5) tickle(h0.x, h0.y, h1.x, h1.y);
+  }
+}
+function tickle(x0, y0, x1, y1) {
+  const ppm = pxPerMeterAt(sim.m);
+  let any = false;
+  for (let k = 0; k < TN; k++) {
+    let hitK = false;
+    for (let i = 2; i < TP && !hitK; i++) {
+      const b = (k * TP + i) * 3;
+      toScreen(tx[b], tx[b + 1], tx[b + 2], _s);
+      const dx = x1 - x0, dy = y1 - y0, l2 = dx * dx + dy * dy || 1;
+      const t = Math.min(1, Math.max(0, ((_s.x - x0) * dx + (_s.y - y0) * dy) / l2));
+      const d = Math.hypot(_s.x - x0 - dx * t, _s.y - y0 - dy * t);
+      if (d < 0.045 * ppm + tRad[k * TP + i] * ppm) hitK = true;
+    }
+    if (hitK) {
+      const tt = T[k];
+      const age = sim.t - tt.tickleT;
+      if (age > 1.0 || age < 0) tt.tickleT = sim.t;
+      else if (age > 0.25) tt.tickleT = sim.t - 0.25; // keep it curled while tickling continues
+      any = true;
+    }
+  }
+  if (any) { sim.squintT = (sim.t - sim.squintT > 0.12 && sim.t - sim.squintT < 0.9) ? sim.t - 0.12 : sim.t; used(); }
+}
+function onUp(e) {
+  if (!grab.type || e.pointerId !== grab.id) return;
+  if (grab.type === 'tent') {
+    const tt = T[grab.k];
+    tt.grabbed = -1; tt.recoilT = sim.t;
+  } else if (grab.moved) {
+    // toss: clamp release speed, then drift
+    let vx = 0, vy = 0, vz = 0;
+    for (let i = 0; i < NC; i++) { vx += cvel[i * 3]; vy += cvel[i * 3 + 1]; vz += cvel[i * 3 + 2]; }
+    vx /= NC; vy /= NC; vz /= NC;
+    const sp = Math.hypot(vx, vy, vz), cap = 0.7;
+    if (sp > cap) { const f = cap / sp - 1; for (let i = 0; i < NC; i++) { cvel[i * 3] += vx * f; cvel[i * 3 + 1] += vy * f; cvel[i * 3 + 2] += vz * f; } }
+    sim.mode = 'tossed'; sim.releaseT = sim.t;
+  }
+  grab.type = null; grab.id = -1;
+  controls.enabled = true;
+  try { canvas.releasePointerCapture(e.pointerId); } catch (_) { /* already released */ }
+}
+canvas.addEventListener('pointerdown', onDown);
+canvas.addEventListener('pointermove', onMove);
+canvas.addEventListener('pointerup', onUp);
+canvas.addEventListener('pointercancel', onUp);
+canvas.addEventListener('pointerleave', () => { pointer.inside = false; });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// orbit (registered after our handlers so a grab can disable it first)
+const controls = new OrbitControls(camera, canvas);
+controls.target.copy(CAM_TARGET);
+controls.enablePan = false;
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.rotateSpeed = 0.6;
+controls.minDistance = 1.0; controls.maxDistance = 2.4;
+controls.minAzimuthAngle = -Math.PI / 3; controls.maxAzimuthAngle = Math.PI / 3;
+controls.minPolarAngle = THREE.MathUtils.degToRad(35); controls.maxPolarAngle = THREE.MathUtils.degToRad(96);
+
+// ---------------------------------------------------------------- UI
+const soft = document.getElementById('soft'), cur = document.getElementById('cur');
+const softOut = document.getElementById('softOut'), curOut = document.getElementById('curOut');
+const panel = document.getElementById('panel');
+soft.addEventListener('input', () => { sim.softness = +soft.value; softOut.textContent = (+soft.value).toFixed(2); });
+cur.addEventListener('input', () => { sim.current = +cur.value; curOut.textContent = (+cur.value).toFixed(2); });
+document.getElementById('reset').addEventListener('click', () => {
+  soft.value = 0.3; cur.value = 0.3; soft.dispatchEvent(new Event('input')); cur.dispatchEvent(new Event('input'));
+  grab.type = null; controls.enabled = true;
+  resetSim(); fitCamera(true);
+});
+
+function fitDistance() {
+  const aspect = innerWidth / innerHeight;
+  const tanH = Math.tan(THREE.MathUtils.degToRad(17.5));
+  return THREE.MathUtils.clamp(0.64 / (2 * tanH * aspect), 1.6, 2.4);
+}
+function fitCamera(resetView) {
+  const W = innerWidth, H = innerHeight;
+  renderer.setSize(W, H, false);
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  camera.aspect = W / H;
+  if (resetView) { placeCamera(fitDistance()); controls.update(); }
+  // shift the projection so the hero sits in the free area beside / above the panel
+  const pr = panel.getBoundingClientRect();
+  let ox = 0, oy = 0;
+  const narrow = W <= 700;
+  if (!narrow) ox = -(pr.right) / 2;
+  else { const top = 56, free = (top + pr.top) / 2; oy = H / 2 - free; }
+  camera.setViewOffset(W, H, ox, oy, W, H);
+  camera.updateProjectionMatrix();
+  // how far a toss may go before it would slide under the panel / off screen
+  const d = camera.position.distanceTo(CAM_TARGET);
+  const mpp = 2 * d * Math.tan(THREE.MathUtils.degToRad(17.5)) / H;
+  const hx = narrow ? W / 2 : (W - pr.right) / 2, hy = narrow ? (pr.top - 56) / 2 : H / 2;
+  sim.boundX = THREE.MathUtils.clamp(hx * mpp - 0.29, 0.04, 0.24);
+  sim.boundY = THREE.MathUtils.clamp(hy * mpp - 0.29, 0.04, 0.2);
+}
+addEventListener('resize', () => fitCamera(false));
+
+// ================================================================= LOOP
+const stats = { fps: 0, frames: [], windowFps: [], halved: false, frameMs: 0 };
+let acc = 0, last = performance.now(), fpsWinStart = last, fpsWinCount = 0, lowWins = 0, started = last;
+function tick(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  const t0 = performance.now();
+  if (!window.__jellyPaused) {
+    acc += dt;
+    let n = 0;
+    while (acc >= SUB && n < 8) { physicsStep(SUB); acc -= SUB; n++; }
+    if (n === 8) acc = 0;
+  }
+  if (window.__jellyNoRender) return;
+  updateHero(dt);
+  controls.update();
+  renderCaustics(now / 1000);
+  renderer.render(scene, camera);
+  stats.frameMs = performance.now() - t0;
+  // fps monitor: if a 1 s window drops under 55 fps, halve the transmission resolution
+  fpsWinCount++;
+  if (now - fpsWinStart >= 1000) {
+    stats.fps = fpsWinCount * 1000 / (now - fpsWinStart);
+    stats.windowFps.push(stats.fps); if (stats.windowFps.length > 30) stats.windowFps.shift();
+    fpsWinStart = now; fpsWinCount = 0;
+    if (now - started > 2000 && stats.fps < 55) { if (++lowWins >= 2 && !transmissionHalf) { transmissionHalf = true; stats.halved = true; } }
+    else lowWins = 0;
+  }
+}
+
+resetSim();
+fitCamera(true);
+updateHero(0);
+renderer.setAnimationLoop(tick);
+
+// ---------------------------------------------------------------- test / inspection hooks
+window.__jelly = {
+  sim, T, stats, V0, NC, camera, controls,
+  get transmissionHalf() { return transmissionHalf; },
+  screenOfParticle(k, i) { const b = (k * TP + i) * 3; const o = {}; toScreen(tx[b], tx[b + 1], tx[b + 2], o); return o; },
+  screenOfMantle() { const o = {}; toScreen(sim.m.x, sim.m.y + 0.04, sim.m.z, o); return o; },
+  screenOfWorld(x, y, z) { const o = {}; toScreen(x, y, z, o); return o; },
+  heroScreenBox() {
+    const o = {}; let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    const add = (x, y, z) => { toScreen(x, y, z, o); x0 = Math.min(x0, o.x); x1 = Math.max(x1, o.x); y0 = Math.min(y0, o.y); y1 = Math.max(y1, o.y); };
+    for (let v = 0; v < mantlePos.length; v += 30) add(mantlePos[v], mantlePos[v + 1], mantlePos[v + 2]);
+    for (let k = 0; k < TN; k++) for (let i = 0; i < TP; i++) { const b = (k * TP + i) * 3; add(tx[b], tx[b + 1], tx[b + 2]); }
+    return { x0, y0, x1, y1 };
+  },
+  heroWorldBox() {
+    let y0 = 1e9, y1 = -1e9;
+    for (let v = 1; v < mantlePos.length; v += 3) { y0 = Math.min(y0, mantlePos[v]); y1 = Math.max(y1, mantlePos[v]); }
+    for (let k = 0; k < TN; k++) for (let i = 0; i < TP; i++) { const y = tx[(k * TP + i) * 3 + 1]; y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    return { y0, y1, h: y1 - y0 };
+  },
+  volume() { return triVolume(cx, sim.m.x, sim.m.y, sim.m.z) / V0; },
+  comSpeed: comVelocity,
+  dentDepth() {
+    // how far the poked spot sits inside the undisturbed (goal) surface
+    const pk = sim.poke; if (!pk) return 0;
+    let best = 0;
+    for (let i = 0; i < NS; i++) if (pk.w[i] > 0.6) {
+      const b = i * 3, qx = cq[b] * sim.S[0], qy = cq[b + 1] * sim.S[1], qz = cq[b + 2] * sim.S[2], G = sim.R;
+      const gx = sim.m.x + G[0] * qx + G[1] * qy + G[2] * qz, gy = sim.m.y + G[3] * qx + G[4] * qy + G[5] * qz, gz = sim.m.z + G[6] * qx + G[7] * qy + G[8] * qz;
+      best = Math.max(best, -((cx[b] - gx) * pk.n.x + (cx[b + 1] - gy) * pk.n.y + (cx[b + 2] - gz) * pk.n.z));
+    }
+    return best;
+  },
+  // motion energy relative to the undisturbed idle goal (for the rest test)
+  motion() {
+    let cv = 0;
+    let vx = 0, vy = 0, vz = 0;
+    for (let i = 0; i < NC; i++) { vx += cvel[i * 3]; vy += cvel[i * 3 + 1]; vz += cvel[i * 3 + 2]; }
+    vx /= NC; vy /= NC; vz /= NC;
+    for (let i = 0; i < NC; i++) cv = Math.max(cv, Math.hypot(cvel[i * 3] - vx, cvel[i * 3 + 1] - vy, cvel[i * 3 + 2] - vz));
+    let tv = 0;
+    for (let i = 0; i < TN * TP; i++) tv = Math.max(tv, Math.hypot(tvel[i * 3], tvel[i * 3 + 1], tvel[i * 3 + 2]));
+    return { cage: cv, tent: tv, com: Math.hypot(vx, vy, vz) };
+  },
+  perturb(s) {
+    for (let i = 0; i < NC * 3; i++) cvel[i] += (Math.random() - 0.5) * 2 * s;
+    for (let i = 3; i < TN * TP * 3; i++) tvel[i] += (Math.random() - 0.5) * 2 * s;
+  },
+  step(seconds) { const n = Math.round(seconds / SUB); for (let i = 0; i < n; i++) physicsStep(SUB); updateHero(SUB); },
+  penetration() {
+    // worst current overlap (m): tentacle/tentacle capsules and tentacle/mantle
+    let worst = 0;
+    const NSg = TN * TSEG;
+    for (let A = 0; A < NSg; A++) for (let B = A + 1; B < NSg; B++) {
+      const ka = (A / TSEG) | 0, ia = A % TSEG, kb = (B / TSEG) | 0, ib = B % TSEG;
+      if (ka === kb && ib - ia < 4) continue; if (ia === 0 && ib === 0) continue;
+      const a0 = (ka * TP + ia) * 3, a1 = a0 + 3, b0 = (kb * TP + ib) * 3, b1 = b0 + 3;
+      segSeg(tx[a0], tx[a0 + 1], tx[a0 + 2], tx[a1], tx[a1 + 1], tx[a1 + 2], tx[b0], tx[b0 + 1], tx[b0 + 2], tx[b1], tx[b1 + 1], tx[b1 + 2]);
+      const s = _st[0], t = _st[1];
+      const d = Math.hypot(tx[a0] + (tx[a1] - tx[a0]) * s - tx[b0] - (tx[b1] - tx[b0]) * t, tx[a0 + 1] + (tx[a1 + 1] - tx[a0 + 1]) * s - tx[b0 + 1] - (tx[b1 + 1] - tx[b0 + 1]) * t, tx[a0 + 2] + (tx[a1 + 2] - tx[a0 + 2]) * s - tx[b0 + 2] - (tx[b1 + 2] - tx[b0 + 2]) * t);
+      const rA = tRad[ka * TP + ia] * (1 - s) + tRad[ka * TP + ia + 1] * s, rB = tRad[kb * TP + ib] * (1 - t) + tRad[kb * TP + ib + 1] * t;
+      worst = Math.max(worst, rA + rB - d);
+    }
+    const R = sim.R, S = sim.S, m = sim.m;
+    let body = 0;
+    for (let k = 0; k < TN; k++) for (let i = 2; i < TP; i++) {
+      const b = (k * TP + i) * 3, r = tRad[k * TP + i];
+      const dx = tx[b] - m.x, dy = tx[b + 1] - m.y, dz = tx[b + 2] - m.z;
+      const lx = R[0] * dx + R[3] * dy + R[6] * dz, ly = R[1] * dx + R[4] * dy + R[7] * dz, lz = R[2] * dx + R[5] * dy + R[8] * dz;
+      const e = Math.sqrt((lx / (SEMI[0] * S[0] + r)) ** 2 + (ly / (SEMI[1] * S[1] + r)) ** 2 + (lz / (SEMI[2] * S[2] + r)) ** 2);
+      if (e < 1) body = Math.max(body, (1 - e) * Math.hypot(lx, ly, lz) / Math.max(e, 1e-6) * e);
+    }
+    return { tentacle: worst, body };
+  },
+  maxStretchNow() { let best = 1; for (let k = 0; k < TN; k++) best = Math.max(best, T[k].stretch); return best; },
+  curls() { return T.map((t) => +t.curl.toFixed(3)); },
+  counts: { cage: NC, mantleVerts: mantleSkin.n, mantleTris: nets.index.length / 3, suckers: TN * SUCK_PER, segments: TSEG },
+};
+</script>
+</body>
+</html>
