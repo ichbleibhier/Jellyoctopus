@@ -1,0 +1,7 @@
+{
+  "name": "jelly-octopus",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node build.mjs" },
+  "devDependencies": { "three": "0.160.0" }
+}
